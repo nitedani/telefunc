@@ -31,7 +31,6 @@ function installTelefunc(app) {
       method: req.method,
       readable: req,
       contentType: req.headers['content-type'] || '',
-      context,
     })
     res.status(httpResponse.statusCode).type(httpResponse.contentType).send(httpResponse.body)
   })

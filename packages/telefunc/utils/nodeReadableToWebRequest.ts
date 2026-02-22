@@ -30,7 +30,7 @@ function nodeReadableToWebRequest(
     method,
     headers: headerPairs,
     body,
-    // @ts-ignore duplex required for streaming request bodies
+    // @ts-expect-error duplex required for streaming request bodies
     duplex: 'half',
   })
 }
