@@ -81,10 +81,10 @@ class LazyBlob extends BaseStreamBlob {
   #partKey: string
   #consumed = false
 
-  constructor(reader: MultipartReader, partKey: string, metadata: BlobMetadata) {
+  constructor(reader: MultipartReader, metadata: BlobMetadata) {
     super()
     this.#reader = reader
-    this.#partKey = partKey
+    this.#partKey = metadata.key
     this.size = metadata.size
     this.type = metadata.type
   }
@@ -168,8 +168,8 @@ class LazyFile extends LazyBlob implements File {
   readonly webkitRelativePath: string = ''
   readonly [LAZY_FILE_BRAND] = true
 
-  constructor(reader: MultipartReader, partKey: string, metadata: FileMetadata) {
-    super(reader, partKey, metadata)
+  constructor(reader: MultipartReader, metadata: FileMetadata) {
+    super(reader, metadata)
     this.name = metadata.name
     this.lastModified = metadata.lastModified
   }
