@@ -1,3 +1,18 @@
+## [0.2.19](https://github.com/brillout/telefunc/compare/v0.2.18...v0.2.19) (2026-02-22)
+
+
+### Bug Fixes
+
+* @brillout/json-serializer@^0.5.22 ([604a8cf](https://github.com/brillout/telefunc/commit/604a8cfc25917e65f536a9be1378fccf06795567))
+* avoid TypeScript warning on unused generated shield type (fix [#229](https://github.com/brillout/telefunc/issues/229)) ([#231](https://github.com/brillout/telefunc/issues/231)) ([6f0396d](https://github.com/brillout/telefunc/commit/6f0396da8e07d5f742ef2fc59d11af655779d423))
+
+
+### Features
+
+* file uploads ([#234](https://github.com/brillout/telefunc/issues/234)) ([cb80f02](https://github.com/brillout/telefunc/commit/cb80f0248c194ad111eea0c9a761f6d4f29586f5))
+
+
+
 ## [0.2.18](https://github.com/brillout/telefunc/compare/v0.2.17...v0.2.18) (2026-02-13)
 
 
