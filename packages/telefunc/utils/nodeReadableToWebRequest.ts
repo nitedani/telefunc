@@ -17,9 +17,18 @@ function nodeReadableToWebRequest(
       readable.on('error', (err) => controller.error(err))
     },
   })
+  const headerPairs: [string, string][] = []
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) continue
+    if (Array.isArray(value)) {
+      for (const v of value) headerPairs.push([key, v])
+    } else {
+      headerPairs.push([key, value])
+    }
+  }
   return new Request(url, {
     method,
-    headers: headers as Record<string, string>,
+    headers: headerPairs,
     body,
     // @ts-ignore duplex required for streaming request bodies
     duplex: 'half',
