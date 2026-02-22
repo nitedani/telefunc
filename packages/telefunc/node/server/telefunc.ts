@@ -106,6 +106,10 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
       '`telefunc({ method })`: argument `method` should be a string.',
     )
     assertUsage(hasProp(httpRequest, 'body'), '`telefunc({ body })`: argument `body` is missing.')
+    assertUsage(
+      hasProp(httpRequest, 'body', 'string'),
+      '`telefunc({ body })`: argument `body` should be a string. Make sure `body` is the HTTP body string of the request. Note that with some server frameworks, such as Express.js, a server middleware is needed to parse the HTTP body of `Content-Type: text/plain` requests.',
+    )
   }
   assertUsage(
     !('context' in httpRequest) || hasProp(httpRequest, 'context', 'object'),
