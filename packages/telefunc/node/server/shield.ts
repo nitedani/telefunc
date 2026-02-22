@@ -377,10 +377,10 @@ function getTypeName(thing: unknown): string {
     if (thing.constructor === Date) {
       return 'date'
     }
-    if (isLazyFile(thing) || (typeof File !== 'undefined' && thing instanceof File)) {
+    if (isLazyFile(thing)) {
       return 'file'
     }
-    if (isLazyBlob(thing) || (typeof Blob !== 'undefined' && thing instanceof Blob)) {
+    if (isLazyBlob(thing)) {
       return 'blob'
     }
     if (Array.isArray(thing)) {
