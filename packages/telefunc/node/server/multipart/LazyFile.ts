@@ -4,6 +4,7 @@ export { isLazyBlob }
 export { isLazyFile }
 
 import type { MultipartReader } from './MultipartReader.js'
+import type { FileMetadata, BlobMetadata } from '../../../shared/multipart/constants.js'
 import { assertUsage } from '../../../utils/assert.js'
 
 const LAZY_BLOB_BRAND = Symbol.for('telefunc.LazyBlob')
@@ -80,7 +81,7 @@ class LazyBlob extends BaseStreamBlob {
   #partKey: string
   #consumed = false
 
-  constructor(reader: MultipartReader, partKey: string, metadata: { size: number; type: string }) {
+  constructor(reader: MultipartReader, partKey: string, metadata: BlobMetadata) {
     super()
     this.#reader = reader
     this.#partKey = partKey
@@ -167,11 +168,7 @@ class LazyFile extends LazyBlob implements File {
   readonly webkitRelativePath: string = ''
   readonly [LAZY_FILE_BRAND] = true
 
-  constructor(
-    reader: MultipartReader,
-    partKey: string,
-    metadata: { name: string; size: number; type: string; lastModified: number },
-  ) {
+  constructor(reader: MultipartReader, partKey: string, metadata: FileMetadata) {
     super(reader, partKey, metadata)
     this.name = metadata.name
     this.lastModified = metadata.lastModified

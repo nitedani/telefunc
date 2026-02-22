@@ -1,6 +1,12 @@
 export { createMultipartReplacer }
 
-import { SERIALIZER_PREFIX_FILE, SERIALIZER_PREFIX_BLOB, SERIALIZER_PLACEHOLDER_KEY } from './constants.js'
+import {
+  SERIALIZER_PREFIX_FILE,
+  SERIALIZER_PREFIX_BLOB,
+  SERIALIZER_PLACEHOLDER_KEY,
+  type FileMetadata,
+  type BlobMetadata,
+} from './constants.js'
 
 function constructMultipartKey(index: number): string {
   return `${SERIALIZER_PLACEHOLDER_KEY}_${index}`
@@ -19,7 +25,7 @@ function createMultipartReplacer(callbacks: {
     if (value instanceof File) {
       const key = constructMultipartKey(nextIndex++)
       callbacks.onFile(key, value)
-      const fileMetadata = {
+      const fileMetadata: FileMetadata = {
         key,
         name: value.name,
         size: value.size,
@@ -34,7 +40,7 @@ function createMultipartReplacer(callbacks: {
     if (value instanceof Blob) {
       const key = constructMultipartKey(nextIndex++)
       callbacks.onBlob(key, value)
-      const blobMetadata = { key, size: value.size, type: value.type }
+      const blobMetadata: BlobMetadata = { key, size: value.size, type: value.type }
       return {
         replacement: SERIALIZER_PREFIX_BLOB + serializer(blobMetadata),
         resolved: true,

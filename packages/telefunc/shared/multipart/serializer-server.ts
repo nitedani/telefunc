@@ -3,7 +3,13 @@ export { createMultipartReviver }
 
 import type { Reviver } from '@brillout/json-serializer/parse'
 import type { LazyBlob, LazyFile } from '../../node/server/multipart/LazyFile.js'
-import { SERIALIZER_PREFIX_FILE, SERIALIZER_PREFIX_BLOB, SERIALIZER_PLACEHOLDER_KEY } from './constants.js'
+import {
+  SERIALIZER_PREFIX_FILE,
+  SERIALIZER_PREFIX_BLOB,
+  SERIALIZER_PLACEHOLDER_KEY,
+  type FileMetadata,
+  type BlobMetadata,
+} from './constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -11,9 +17,6 @@ assertIsNotBrowser()
 function parseMultipartIndex(key: string): number {
   return parseInt(key.slice(SERIALIZER_PLACEHOLDER_KEY.length + 1), 10)
 }
-
-type FileMetadata = { key: string; name: string; size: number; type: string; lastModified: number }
-type BlobMetadata = { key: string; size: number; type: string }
 
 /**
  * Deserialize:
