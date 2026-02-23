@@ -1,10 +1,10 @@
 import { Link } from '@brillout/docpress'
 
-> This page is about handling bugs, expected errors, and network errors.
+> This page is about handling: bugs, expected errors, and network errors.
 >
-> - To block unauthorized access: <Link href="/permissions" />
-> - To handle invalid `<form>` values: <Link href="/form-validation" />
-> - To install error tracking: <Link href="/onBug" />
+> - To block unauthorized access, see: <Link href="/permissions" />
+> - To handle invalid `<form>` values, see: <Link href="/form-validation" />
+> - To install error tracking, see: <Link href="/onBug" />
 
 
 ## Bugs
@@ -18,7 +18,7 @@ If a telefunction has a bug:
 export { hello }
 
 async function hello(name: string) {
-  // This telefunction has a bug: it should be `name` instead of `namee`
+  // Typo => syntax error => it should be `name` instead of `namee`
   return 'Hello ' + namee
 }
 ```
@@ -52,13 +52,13 @@ Then a telefunction call throws an error:
 
 ## Expected Errors
 
-An error thrown by a telefunction may not be a bug but an expected error instead.
+An error thrown by a telefunction doesn't have to be a bug — it can be expected.
 
 For example:
- - Some authentication libraries throw an error if the user isn't logged in.
- - Some validation libraries throw errors upon invalid data.
+ - An authentication library throwing an error if the user isn't logged in.
+ - A validation library throwing an error upon invalid data.
 
-You can:
+In this situation, you can:
  1. Propagate the error to the frontend, or
  2. handle the error on the server-side.
 
@@ -101,9 +101,9 @@ function onFormSubmit(data) {
 
 In general, we recommend using `return { someValue }` instead of `throw Abort(someValue)`, see explanation at <Link href="/form-validation#throw-abort-somevalue" doNotInferSectionTitle={true} />.
 
-> You need to catch the error and use `throw Abort(someValue)` because Telefunc doesn't send the original `Error` object to the frontend (in order to avoid leaking sensitive information).
+> You must catch the error and use `throw Abort(someValue)` because Telefunc doesn't send the original `Error` object to the frontend (in order to avoid leaking sensitive information).
 
-Also see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
+See also: <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
 
 <br/>
 
@@ -158,3 +158,8 @@ If the user's browser can't connect to your server:
   </body>
 </html>
 ```
+
+
+## See aso
+
+- <Link href="/onBug" />

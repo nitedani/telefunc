@@ -255,7 +255,7 @@ function misc() {
   return (
     [
       {
-        title: '`Abort()` vs `new Error()`',
+        title: '`throw Abort()` vs `throw new Error()`',
         url: '/abort-vs-error',
       },
       {

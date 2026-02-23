@@ -3,35 +3,43 @@ import { ReadingRecommendation } from '../../components'
 
 <ReadingRecommendation links={['/RPC']} />
 
-You may wonder, why not use `throw new Error()` instead of `throw Abort()`?
+You might wonder: why not just use `throw new Error()` instead of `throw Abort()`?
+
+Let's have a look at following example:
 
 ```ts
 // TodoList.telefunc.ts
 // Environment: server
 
-import { getContext } from 'telefunc'
+import { Abort, getContext } from 'telefunc'
 
 export async function getTodoList() {
   const { user } = getContext()
   if (!user) {
-    // Instead of `throw Abort()`
+    // ❌ Wrong usae
     throw new Error()
+    // ✅ Correct usage
+    throw Abort()
   }
 
   // ...
 }
 ```
 
-By using `throw Abort()`, you are telling Telefunc that this is an error that is **expected** to happen (when a third-party makes an invalid or unprivileged telefunction call). Whereas `throw new Error()` is **unexpected**: it should never happen and, if it does happen, then it's a bug in your backend code.
+It's expected that the user might not be logged in — using `throw Abort()` tells Telefunc that the error is **expected**.
 
-For example, `throw Abort()` doesn't trigger `onBug()`, see <Link href="/error-handling#error-tracking" />.
+> Telefunc interprets `throw new Error()` as **unexpected**. Telefunc interprets any error that isn't `throw Abort()` as a bug in your backend code.
 
+Therefore:
+ - Use **`throw Abort()`** for **wrong public usage** of your telefunction.
+ - Use **`throw new Error()`** for **wrong internal usage** (i.e. a bug).
 
-## Rule
-
-The rule for a correct usage is:
- - Use **`throw Abort()`** for errors originating from a **wrong public usage** of a telefunction.
- - Use **`throw new Error()`** for errors originating from a **wrong internal usage** of a function.
+Because:
+- `throw Abort()` doesn't trigger <Link href="/onBug">the `onBug()` hook</Link> (whereas `throw new Error()` does)
+- `throw Abort()` isn't logged (whereas Telefunc logs `throw new Error()` via `console.error()`)
+- `throw Abort('some error message')` => Telefunc sends `some error message` to the client
+- `throw new Error('some error message')` => Telefunc doesn't send  `some error message` to the client.
+  > To prevent leaking sensitive information, Telefunc never forwards unexpected server errors to the client.
 
 
 ## Example
@@ -40,37 +48,39 @@ The rule for a correct usage is:
 // auth/getUser.ts
 // Environment: server
 
-// Note that `auth/getUser.ts` is not a `.telefunc.ts` file (`getUser()` is
-// not a telefunction but a so-called `getContext()` wrapper).
+// Note that `auth/getUser.ts` isn't a `.telefunc.ts` file.
+// `getUser()` isn't a telefunction, it's what we call a `getContext()` wrapper.
+
 export { getUser }
 
 import { Abort, getContext } from 'telefunc'
 
+/**
+ * Retrieve the current user from context, and abort if the user doesn't have the right permission
+ */
 function getUser({ permission }: { permission: string }) {
+  // Wrong internal usage (`getUser()` isn't a telefunction)
   if (!permission) {
-    throw new Error('Wrong getUser() usage: missing permission')
+    throw new Error('[Wrong getUser() usage] Missing `permission` argument')
   }
-  // Avoids typos (a typo like `admni` could have dramatic consequences)
+  // Prevent typos
   if (!['public', 'admin'].includes(permission)) {
-    throw new Error('Wrong getUser() usage: unknown permission ' + permission)
+    throw new Error('[Wrong getUser() usage] Unknown `permission` value: ' + permission)
   }
 
   const { user } = getContext()
 
+  // User isn't logged in
   if (!user) {
     throw Abort()
   }
 
-  if (permission === 'admin') {
-    if (!user.isAdmin) {
-      throw Abort()
-    }
-    return user
+  // User doesn't have the right permission
+  if (permission === 'admin' && !user.isAdmin) {
+    throw Abort()
   }
 
-  if (permission === 'public') {
-    return user
-  }
+  return user
 }
 ```
 
@@ -92,4 +102,10 @@ export async function onCommentDelete(id: number) {
 
 It is expected that `throw Abort()` can occur, since `onCommentDelete()` is a public function anyone can call while not being an admin.
 
-Whereas `throw new Error('Wrong getUser() usage')` is expected to *not* occur: if you make a typo and call `getUser({ permission: 'admni' })` then it's an internal bug in your backend that you should fix.
+Whereas `throw new Error('[Wrong getUser() usage] ...')` shoud *never* occur: if you make a typo and call `getUser({ permission: 'admni' })` then it's an internal bug in your backend code that should be fixed.
+
+
+## See aso
+
+- <Link href="/error-handling" />
+- <Link href="/onBug" />
