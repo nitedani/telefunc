@@ -58,7 +58,7 @@ For example:
  - Some authentication libraries throw an error if the user isn't logged in.
  - Some validation libraries throw errors upon invalid data.
 
-We can:
+You can:
  1. Propagate the error to the frontend, or
  2. handle the error on the server-side.
 
@@ -66,7 +66,7 @@ We can:
 
 **1. Propagate the error to the frontend.**
 
-We can propagate error information to the frontend like this:
+You can propagate error information to the frontend like this:
 
 ```ts
 import { validate } from 'some-library'
@@ -82,7 +82,7 @@ function onFormSubmit(data) {
 }
 ```
 
-We can also use `throw Abort(someValue)`:
+You can also use `throw Abort(someValue)`:
 
 ```ts
 import { validate } from 'some-library'
@@ -101,7 +101,7 @@ function onFormSubmit(data) {
 
 In general, we recommend using `return { someValue }` instead of `throw Abort(someValue)`, see explanation at <Link href="/form-validation#throw-abort-somevalue" doNotInferSectionTitle={true} />.
 
-> We need to catch the error and use `throw Abort(someValue)` because Telefunc doesn't send the original `Error` object to the frontend (in order to avoid leaking sensitive information).
+> You need to catch the error and use `throw Abort(someValue)` because Telefunc doesn't send the original `Error` object to the frontend (in order to avoid leaking sensitive information).
 
 Also see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={true} />.
 
@@ -109,7 +109,7 @@ Also see <Link href="/permissions#getcontext-wrapping" doNotInferSectionTitle={t
 
 **2. Handle the error on the server-side.**
 
-We can handle the thrown error at our Telefunc server middleware:
+You can handle the thrown error at your Telefunc server middleware:
 
 ```ts
 // server.ts
@@ -123,7 +123,7 @@ app.all('/_telefunc', async (req: Request, res: Response) => {
   const httpResponse = await telefunc(/* ... */)
   // Telefunc exposes any error thrown by a telefunction at httpResponse.err
   if (httpResponse.err) {
-    // Our error handling
+    // Error handling
   }
 })
 ```
@@ -133,7 +133,7 @@ Also see <Link href="/getContext#provide" />.
 
 ## Network Errors
 
-If the user's browser can't connect to our server:
+If the user's browser can't connect to your server:
 
 ```html
 <!-- index.html -->
@@ -150,7 +150,7 @@ If the user's browser can't connect to our server:
         if (err.isConnectionError) {
           // There is a network problem:
           //  - the user isn't connected to the internet, or
-          //  - our server is down.
+          //  - your server is down.
           console.log(err.message) // Prints 'No Server Connection'
         }
       }
