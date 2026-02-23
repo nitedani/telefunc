@@ -102,10 +102,10 @@ export async function onCommentDelete(id: number) {
 
 It is expected that `throw Abort()` can occur, since `onCommentDelete()` is a public function anyone can call while not being an admin.
 
-Whereas `throw new Error('[Wrong getUser() usage] ...')` shoud *never* occur: if you make a typo and call `getUser({ permission: 'admni' })` then it's an internal bug in your backend code that should be fixed.
+Whereas `throw new Error('[Wrong getUser() usage] ...')` should *never* occur: if you make a typo and call `getUser({ permission: 'admni' })` then it's an internal bug in your backend code that should be fixed.
 
 
-## See aso
+## See also
 
 - <Link href="/error-handling" />
 - <Link href="/onBug" />
