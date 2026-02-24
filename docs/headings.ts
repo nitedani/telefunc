@@ -41,6 +41,11 @@ const headings = [
     url: '/RPC',
   },
   {
+    level: 2,
+    title: 'RPC vs GraphQL/REST',
+    url: '/RPC-vs-GraphQL-REST',
+  },
+  {
     level: 1,
     title: 'Get Started',
     titleIcon: iconSeedling,
@@ -261,10 +266,6 @@ function misc() {
       {
         title: 'Telefunc Transformer',
         url: '/transformer',
-      },
-      {
-        title: 'RPC vs GraphQL/REST',
-        url: '/RPC-vs-GraphQL-REST',
       },
       {
         title: 'Initial Page Data',
