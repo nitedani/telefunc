@@ -10,7 +10,7 @@ import { setAbortController } from './abort.js'
 import type { ClientCallContext } from './withContext.js'
 import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
 import { getStickyShardForPost } from '../wire-protocol/client/shard-registry.js'
-import type { ChannelTransport, StreamTransport } from '../wire-protocol/constants.js'
+import type { ChannelTransports, StreamTransport } from '../wire-protocol/constants.js'
 
 type CallContext = {
   telefuncFilePath: string
@@ -22,7 +22,7 @@ type CallContext = {
   fetch: typeof globalThis.fetch | null
   abortController: AbortController
   stream?: { transport?: StreamTransport }
-  channel?: { transport?: ChannelTransport }
+  channel?: { transports?: ChannelTransports }
 }
 
 function remoteTelefunctionCall(
@@ -68,9 +68,9 @@ function remoteTelefunctionCall(
     })
   }
 
-  if (callClientContext?.channel?.transport) {
+  if (callClientContext?.channel?.transports) {
     objectAssign(callContext, {
-      channel: { transport: callClientContext.channel.transport },
+      channel: { transports: callClientContext.channel.transports },
     })
   }
 

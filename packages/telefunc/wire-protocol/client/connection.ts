@@ -6,6 +6,7 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { assert } from '../../utils/assert.js'
 import { ChannelClosedError, ChannelNetworkError } from '../channel-errors.js'
 import {
+  CHANNEL_UPGRADE_TIMEOUT_MS,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
@@ -15,17 +16,25 @@ import {
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   SSE_RECONCILE_DEADLINE_MS,
+  WS_PROBE_TIMEOUT_MS,
+  type ChannelTransports,
 } from '../constants.js'
 import { encodeLengthPrefixedFrames } from '../frame.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { encodeSseRequest } from '../sse-request.js'
 import { TAG, decode, encode, encodeCtrl } from '../shared-ws.js'
-import type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled } from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  CtrlMessage,
+  CtrlReconcile,
+  CtrlReconciled,
+  CtrlSettings,
+  CtrlUpgraded,
+} from '../shared-ws.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
-import type { ChannelTransport } from '../constants.js'
-import { CHANNEL_TRANSPORT } from '../constants.js'
+import { CHANNEL_TRANSPORT, type ChannelTransport } from '../constants.js'
 
 type PendingAck = {
   resolve: (result: unknown) => void
@@ -33,6 +42,7 @@ type PendingAck = {
 }
 
 type BufferedFrame = {
+  kind: OutboundFrameKind
   frame: Uint8Array<ArrayBuffer>
   channelIx: number
   seq?: number
@@ -49,6 +59,7 @@ interface MuxChannel {
   readonly id: string
   readonly defer: boolean
   readonly isClosed: boolean
+  readonly isOpen: boolean
   _onTransportOpen(): void
   _onTransportMessage(data: string): void
   _onTransportBinaryMessage(data: Uint8Array): void
@@ -85,21 +96,27 @@ type ReconcileBatch = {
 type ReconcileBufferedFramesMode = 'batch-on-reconcile' | 'release-after-reconciled'
 
 type ClientConnectionOptions = {
-  transport: ChannelTransport
+  transports: ChannelTransports
   fetchImpl: typeof fetch
 }
 
 type ClientChannelTransport = {
+  readonly type: ChannelTransport
   readonly reconnectTimeoutMessage: string
   readonly supportsPauseResume: boolean
   readonly sendReconcileOnOpen: boolean
+  /** Initial reconcile buffered frames mode for this transport. */
+  readonly reconcileMode: ReconcileBufferedFramesMode
+  probe(): Promise<(() => void) | null>
   start(): void
   hasActiveTransport(): boolean
   isConnecting(): boolean
   sendFrame(frame: OutboundFrame): void
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
-  applyReconciledSettings(ctrl: CtrlReconciled): void
+  applyReconciledSettings(ctrl: CtrlSettings): void
+  /** Wait until the transport-specific upgrade precondition is met before attempting handoff. */
+  prepareForUpgrade(): Promise<void>
   dispose(): void
 }
 
@@ -110,11 +127,26 @@ type SseInitialBatchStage = {
   movedBufferedFrames: OutboundFrame[]
 }
 
+type UpgradeState = {
+  active: boolean
+  disabled: boolean
+  probeAbort: (() => void) | null
+  retiringTransport: ClientChannelTransport | null
+  nextTransport: ClientChannelTransport | null
+  oldInboundClosed: boolean
+  outboundCutoverPending: boolean
+  outboundPromoted: boolean
+  bufferedInboundFrames: Uint8Array<ArrayBuffer>[] | null
+  timeout: ReturnType<typeof setTimeout> | null
+}
+
+type InboundFrame = ReturnType<typeof decode>
+
 class ClientConnection implements MuxConnection {
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
-    const key = `${options.transport}:${telefuncUrl}`
+    const key = `${options.transports.join(',')}:${telefuncUrl}`
     let connection = ClientConnection.cache.get(key)
     if (!connection || connection.closed) {
       connection = new ClientConnection(telefuncUrl, options, key)
@@ -125,8 +157,10 @@ class ClientConnection implements MuxConnection {
   }
 
   private readonly cacheKey: string
-  private readonly reconcileBufferedFramesMode: ReconcileBufferedFramesMode
-  private readonly transport: ClientChannelTransport
+  private readonly telefuncUrl: string
+  private readonly connectionOptions: ClientConnectionOptions
+  private reconcileBufferedFramesMode: ReconcileBufferedFramesMode
+  private transport: ClientChannelTransport
 
   private closed = false
   private connected = false
@@ -136,8 +170,20 @@ class ClientConnection implements MuxConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectAttempt = 0
   private reconnectStart = 0
+  private readonly upgrade: UpgradeState = {
+    active: false,
+    disabled: false,
+    probeAbort: null,
+    retiringTransport: null,
+    nextTransport: null,
+    oldInboundClosed: false,
+    outboundCutoverPending: false,
+    outboundPromoted: false,
+    bufferedInboundFrames: null,
+    timeout: null,
+  }
 
-  // Protocol state (former MuxCore)
+  // Protocol state
   private sessionId: string | null = null
   private nextIndex = 0
   private reconciling = false
@@ -153,23 +199,37 @@ class ClientConnection implements MuxConnection {
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
   private pongTimeoutMs = CHANNEL_PING_INTERVAL_MS * 2
-
-  private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
-    this.cacheKey = cacheKey
-    if (options.transport === CHANNEL_TRANSPORT.SSE) {
-      this.reconcileBufferedFramesMode = 'batch-on-reconcile'
-      this.transport = new SseTransport(telefuncUrl, options.fetchImpl, this)
-    } else {
-      this.reconcileBufferedFramesMode = 'release-after-reconciled'
-      const base = typeof window === 'undefined' ? undefined : window.location.href
-      const url = new URL(telefuncUrl, base)
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-      this.transport = new WsTransport(url.href, this)
+  private readonly dispatchFrame = (frame: InboundFrame): void => {
+    switch (frame.tag) {
+      case TAG.CTRL:
+        this.handleCtrl(frame.ctrl)
+        return
+      case TAG.TEXT:
+      case TAG.TEXT_ACK_REQ:
+      case TAG.BINARY:
+        this.handleDataFrame(frame)
+        return
+      case TAG.ACK_RES:
+        this.handleAckRes(frame.index, frame.ackedSeq, frame.text, frame.status)
     }
   }
+  private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
+    this.cacheKey = cacheKey
+    this.telefuncUrl = telefuncUrl
+    this.connectionOptions = options
+    this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
+    this.reconcileBufferedFramesMode = this.transport.reconcileMode
+  }
 
-  private canSendImmediately(): boolean {
-    return this.connected && this.transport.hasActiveTransport() && !this.reconciling
+  private canSendImmediately(channelIx?: number): boolean {
+    if (this.isAwaitingOutgoingCutover()) return false
+    if (!this.connected || !this.transport.hasActiveTransport() || this.reconciling) return false
+    if (channelIx === undefined) return true
+    return this.channels.get(channelIx)?.isOpen === true
+  }
+
+  private isAwaitingOutgoingCutover(): boolean {
+    return this.upgrade.outboundCutoverPending
   }
 
   private register(channel: MuxChannel): void {
@@ -183,7 +243,7 @@ class ClientConnection implements MuxConnection {
       this.transport.start()
       return
     }
-    if (this.connected && !this.reconciling) {
+    if (this.connected && !this.reconciling && !this.isAwaitingOutgoingCutover()) {
       const reconcileBatch = this.stageReconcileBatch()
       this.sendReconcileBatch(reconcileBatch)
     }
@@ -202,8 +262,8 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.text(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'data', frame, channelIx: ix, seq })
       return
     }
     replay.push(seq, frame)
@@ -219,8 +279,8 @@ class ClientConnection implements MuxConnection {
       this.pendingAcks.set(`${ix}:${seq}`, { resolve, reject })
     })
     const frame = encode.textAckReq(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'ack', frame, channelIx: ix, seq })
       return promise
     }
     replay.push(seq, frame)
@@ -234,8 +294,8 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.binary(ix, data, seq)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'data', frame, channelIx: ix, seq })
       return
     }
     replay.push(seq, frame)
@@ -248,8 +308,8 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     const frame = encode.ackRes(ix, seq, ackedSeq, result, status)
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'ack', frame, channelIx: ix, seq })
       return
     }
     replay.push(seq, frame)
@@ -260,10 +320,10 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encodeCtrl({ t: 'close', ix, timeoutMs: 0 })
-    if (this.canSendImmediately()) {
+    if (this.canSendImmediately(ix)) {
       this.transport.sendFrame({ kind: 'control', frame })
     } else {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      this.sendBuffer.push({ kind: 'control', frame, channelIx: ix, seq: undefined })
     }
   }
 
@@ -271,8 +331,8 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encodeCtrl({ t: 'close', ix, timeoutMs })
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'control', frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: 'control', frame })
@@ -282,8 +342,8 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encodeCtrl({ t: 'close-ack', ix })
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'control', frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: 'control', frame })
@@ -294,8 +354,8 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encodeCtrl({ t: 'pause', ix })
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'control', frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: 'control', frame })
@@ -306,44 +366,206 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encodeCtrl({ t: 'resume', ix })
-    if (!this.canSendImmediately()) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+    if (!this.canSendImmediately(ix)) {
+      this.sendBuffer.push({ kind: 'control', frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
-  _onTransportOpen(): void {
+  _onTransportOpen(transport: ClientChannelTransport): void {
     if (this.closed) return
     this.connected = true
     this.reconnectAttempt = 0
     this.reconnectStart = 0
-    if (!this.transport.sendReconcileOnOpen) return
+    if (transport === this.upgrade.nextTransport) {
+      assert(this.sessionId)
+      transport.sendFrame({ kind: 'control', frame: encodeCtrl({ t: 'upgrade', sessionId: this.sessionId }) })
+      this.startUpgradeTimeout(() => {
+        if (this.upgrade.nextTransport !== transport) return
+        this.cancelUpgradeAttempt()
+      })
+      return
+    }
+    if (!transport.sendReconcileOnOpen) return
     const reconcileBatch = this.stageReconcileBatch()
     this.sendReconcileBatch(reconcileBatch)
   }
 
-  _onTransportFrame(raw: Uint8Array<ArrayBuffer>): void {
+  _onTransportFrame(transport: ClientChannelTransport, raw: Uint8Array<ArrayBuffer>): void {
     const frame = decode(raw)
-    switch (frame.tag) {
-      case TAG.CTRL:
-        this.handleCtrl(frame.ctrl)
-        return
-      case TAG.TEXT:
-      case TAG.TEXT_ACK_REQ:
-      case TAG.BINARY:
-        this.handleDataFrame(frame)
-        return
-      case TAG.ACK_RES:
-        this.handleAckRes(frame.index, frame.ackedSeq, frame.text, frame.status)
+    const bufferedTransport = this.upgrade.bufferedInboundFrames ? this.upgrade.nextTransport : null
+
+    if (transport === this.upgrade.nextTransport && frame.tag === TAG.CTRL && frame.ctrl.t === 'upgraded') {
+      this.handleUpgraded(transport, frame.ctrl)
+      return
     }
+
+    if (transport === this.upgrade.retiringTransport && frame.tag === TAG.CTRL && frame.ctrl.t === 'fin') {
+      this.handleServerFin()
+      return
+    }
+
+    if (transport === bufferedTransport) {
+      const bufferedInboundFrames = this.upgrade.bufferedInboundFrames
+      assert(bufferedInboundFrames)
+      bufferedInboundFrames.push(raw)
+      return
+    }
+
+    this.dispatchFrame(frame)
   }
 
-  _onTransportClosed(rejectedInitial = false): void {
+  private flushHandoffBuffer(): void {
+    const buffer = this.upgrade.bufferedInboundFrames
+    this.upgrade.bufferedInboundFrames = null
+    if (!buffer) return
+    for (const raw of buffer) this.dispatchFrame(decode(raw))
+  }
+
+  /**
+   * Server fin closes the old server->client path only.
+   *
+   * At this point the client can activate inbound WS immediately, but outbound
+   * traffic must stay on the old transport until the old outbox is drained and the
+   * client has emitted its own directional fin.
+   */
+  private handleServerFin(): void {
+    const retiringTransport = this.upgrade.retiringTransport
+    if (!retiringTransport) return
+    if (this.upgrade.oldInboundClosed) return
+    this.upgrade.oldInboundClosed = true
+    if (this.upgrade.bufferedInboundFrames !== null) this.flushHandoffBuffer()
+    this.maybeCompleteUpgradeHandoff()
+  }
+
+  private async finishOutgoingUpgradeAfterDrain(retiringTransport: ClientChannelTransport): Promise<void> {
+    await retiringTransport.prepareForUpgrade()
+    if (this.closed || this.upgrade.retiringTransport !== retiringTransport || !this.upgrade.outboundCutoverPending)
+      return
+    retiringTransport.sendFrame({ kind: 'control', frame: encodeCtrl({ t: 'fin' }) })
+    await retiringTransport.prepareForUpgrade()
+    if (this.closed || this.upgrade.retiringTransport !== retiringTransport || !this.upgrade.outboundCutoverPending)
+      return
+    this.finishOutgoingUpgrade()
+  }
+
+  /**
+   * Final client-side cutover for the client->server direction.
+   *
+   * This runs once the old outbound path is drained, client `fin` is appended to
+   * the retiring outbox, and the final old-path flush carrying that `fin` resolves.
+   */
+  private finishOutgoingUpgrade(): void {
+    const nextTransport = this.upgrade.nextTransport
+    assert(nextTransport)
+    this.transport = nextTransport
+    this.reconcileBufferedFramesMode = nextTransport.reconcileMode
+    this.upgrade.outboundCutoverPending = false
+    this.upgrade.outboundPromoted = true
+    if (this.connected && !this.reconciling && this.hasPendingChannelOpen()) {
+      this.flushSendBufferImmediately()
+      if (this.sendBuffer.length > 0) {
+        const reconcileBatch = this.stageReconcileBatch()
+        this.sendReconcileBatch(reconcileBatch)
+      }
+    }
+    this.maybeCompleteUpgradeHandoff()
+  }
+
+  private maybeCompleteUpgradeHandoff(): void {
+    const retiringTransport = this.upgrade.retiringTransport
+    if (!retiringTransport || !this.upgrade.oldInboundClosed || !this.upgrade.outboundPromoted) return
+    this.clearUpgradeTimeout()
+    this.upgrade.retiringTransport = null
+    this.upgrade.nextTransport = null
+    this.upgrade.oldInboundClosed = false
+    this.upgrade.outboundPromoted = false
+    retiringTransport.abandonActiveTransport()
+    retiringTransport.dispose()
+  }
+
+  private flushSendBufferImmediately(): void {
+    if (!this.connected || !this.transport.hasActiveTransport() || this.reconciling) return
+    let flushed = 0
+    for (const entry of this.sendBuffer) {
+      if (!this.channels.get(entry.channelIx)?.isOpen) break
+      if (entry.seq !== undefined) this.replayBuffers.get(entry.channelIx)?.push(entry.seq, entry.frame)
+      this.transport.sendFrame({ kind: entry.kind, frame: entry.frame })
+      flushed++
+    }
+    if (flushed > 0) this.sendBuffer.splice(0, flushed)
+  }
+
+  private startUpgradeTimeout(onTimeout: () => void): void {
+    this.clearUpgradeTimeout()
+    this.upgrade.timeout = setTimeout(() => {
+      this.upgrade.timeout = null
+      if (this.closed) return
+      onTimeout()
+    }, CHANNEL_UPGRADE_TIMEOUT_MS)
+  }
+
+  private clearUpgradeTimeout(): void {
+    const timeout = this.upgrade.timeout
+    if (!timeout) return
+    clearTimeout(timeout)
+    this.upgrade.timeout = null
+  }
+
+  private cancelUpgradeAttempt(): void {
+    this.clearUpgradeTimeout()
+    this.disposeCandidateTransport()
+    this.upgrade.retiringTransport = null
+    this.upgrade.oldInboundClosed = false
+    this.upgrade.outboundCutoverPending = false
+    this.upgrade.outboundPromoted = false
+    this.upgrade.bufferedInboundFrames = null
+    this.upgrade.active = false
+  }
+
+  private hasPendingChannelOpen(): boolean {
+    for (const channel of this.channels.values()) {
+      if (!channel.isOpen) return true
+    }
+    return false
+  }
+
+  private disposeCandidateTransport(): void {
+    const nextTransport = this.upgrade.nextTransport
+    if (!nextTransport) return
+    nextTransport.abandonActiveTransport()
+    nextTransport.dispose()
+    this.upgrade.nextTransport = null
+  }
+
+  _onTransportClosed(transport: ClientChannelTransport, rejectedInitial = false): void {
     if (this.closed) return
+    if (transport === this.upgrade.nextTransport && transport !== this.transport) {
+      this.cancelUpgradeAttempt()
+      return
+    }
+    if (transport === this.upgrade.retiringTransport && this.upgrade.nextTransport) {
+      this.upgrade.oldInboundClosed = true
+      if (this.upgrade.bufferedInboundFrames !== null) this.flushHandoffBuffer()
+      if (!this.upgrade.outboundPromoted) {
+        this.finishOutgoingUpgrade()
+      } else {
+        this.maybeCompleteUpgradeHandoff()
+      }
+      return
+    }
+    if (transport !== this.transport) {
+      return
+    }
+    if (this.upgrade.active) {
+      this.upgrade.active = false
+      this.upgrade.probeAbort?.()
+      this.upgrade.probeAbort = null
+    }
     const err = new ChannelNetworkError(
       rejectedInitial
-        ? `Server rejected ${this.transport.reconnectTimeoutMessage.includes('WebSocket') ? 'WebSocket' : 'SSE'} connection`
+        ? `Server rejected ${this.transport.type === CHANNEL_TRANSPORT.SSE ? 'SSE' : 'WebSocket'} connection`
         : 'Connection dropped',
     )
     this.handleTransportLoss(err, rejectedInitial)
@@ -369,9 +591,47 @@ class ClientConnection implements MuxConnection {
         this.closeRemoteChannel(ctrl.ix, makeBugError())
         this.startTtlIfIdle()
         return
+      case 'fin':
+        this.handleServerFin()
+        return
+      case 'upgraded':
+        return
       case 'reconciled':
         this.handleReconciled(ctrl)
+        return
     }
+  }
+
+  private applyServerSettings(ctrl: CtrlSettings & { sessionId: string }): void {
+    this.sessionId = ctrl.sessionId
+    if (ctrl.reconnectTimeout) this.reconnectTimeoutMs = ctrl.reconnectTimeout
+    if (ctrl.idleTimeout) this.idleTimeoutMs = ctrl.idleTimeout
+    if (ctrl.clientReplayBuffer) this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+    if (ctrl.pingInterval) {
+      this.pingIntervalMs = ctrl.pingInterval
+      this.pongTimeoutMs = ctrl.pingInterval * 2
+    }
+  }
+
+  private handleUpgraded(transport: ClientChannelTransport, ctrl: CtrlUpgraded): void {
+    transport.applyReconciledSettings(ctrl)
+    this.applyServerSettings(ctrl)
+
+    const retiringTransport = this.upgrade.retiringTransport
+    assert(retiringTransport)
+    this.upgrade.active = false
+    this.upgrade.outboundCutoverPending = true
+    this.upgrade.outboundPromoted = false
+    this.upgrade.bufferedInboundFrames = []
+    this.startUpgradeTimeout(() => {
+      if (this.upgrade.retiringTransport !== retiringTransport) return
+      if (!this.upgrade.outboundPromoted) this.finishOutgoingUpgrade()
+      this.handleServerFin()
+    })
+    if (this.upgrade.oldInboundClosed) this.flushHandoffBuffer()
+    void this.finishOutgoingUpgradeAfterDrain(retiringTransport)
+    this.startPing()
+    this.startTtlIfIdle()
   }
 
   private handleReconciled(ctrl: CtrlReconciled): void {
@@ -384,7 +644,88 @@ class ClientConnection implements MuxConnection {
       this.startPing()
       this.startTtlIfIdle()
     }
+    this.maybeStartUpgrade(ctrl)
   }
+
+  // ── SSE→WS upgrade ──
+
+  private maybeStartUpgrade(ctrl: CtrlReconciled): void {
+    if (this.upgrade.disabled) return
+    const nextTransport = UPGRADE_PATH[this.transport.type]
+    if (!nextTransport || this.upgrade.active) return
+    if (!this.connectionOptions.transports.includes(nextTransport) || !ctrl.transports.includes(nextTransport)) return
+    this.upgrade.active = true
+    void this.probeAndUpgrade(nextTransport)
+  }
+
+  private abortUpgradeAndReconnectSse(err: Error): void {
+    this.clearUpgradeTimeout()
+    this.disposeCandidateTransport()
+    const retiringTransport = this.upgrade.retiringTransport
+    if (retiringTransport) {
+      retiringTransport.abandonActiveTransport()
+      retiringTransport.dispose()
+      this.upgrade.retiringTransport = null
+    }
+    this.upgrade.oldInboundClosed = false
+    this.upgrade.outboundCutoverPending = false
+    this.upgrade.outboundPromoted = false
+    this.upgrade.bufferedInboundFrames = null
+    this.upgrade.disabled = true
+    this.transport.abandonActiveTransport()
+    this.transport.dispose()
+    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
+    this.reconcileBufferedFramesMode = this.transport.reconcileMode
+    this.handleTransportLoss(err)
+  }
+
+  private async probeAndUpgrade(targetTransport: ChannelTransport): Promise<void> {
+    const from = this.transport
+    const to = TRANSPORT_REGISTRY[targetTransport](this.telefuncUrl, this.connectionOptions, this)
+    const closeProbe = await to.probe()
+    if (!closeProbe || !this.upgrade.active) {
+      closeProbe?.()
+      this.upgrade.active = false
+      return
+    }
+
+    this.upgrade.probeAbort = closeProbe
+    if (this.upgrade.probeAbort === closeProbe) this.upgrade.probeAbort = null
+    if (!this.upgrade.active) {
+      closeProbe()
+      return
+    }
+
+    const prepared = await this.prepareUpgradeHandoff(from)
+    if (!prepared || !this.upgrade.active) {
+      closeProbe()
+      this.upgrade.active = false
+      return
+    }
+
+    this.upgrade.active = false
+    this.upgrade.retiringTransport = from
+    this.upgrade.nextTransport = to
+    to.start()
+  }
+
+  private async prepareUpgradeHandoff(transport: ClientChannelTransport): Promise<boolean> {
+    return await new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => resolve(false), CHANNEL_UPGRADE_TIMEOUT_MS)
+      void transport.prepareForUpgrade().then(
+        () => {
+          clearTimeout(timeout)
+          resolve(true)
+        },
+        () => {
+          clearTimeout(timeout)
+          resolve(false)
+        },
+      )
+    })
+  }
+
+  // ── Ping ──
 
   private startPing(): void {
     this.resetPongTimer()
@@ -423,6 +764,10 @@ class ClientConnection implements MuxConnection {
     this.reconciling = false
     this.reconcileIxes.clear()
     this.clearTimer('ttl')
+    if (this.upgrade.retiringTransport) {
+      this.abortUpgradeAndReconnectSse(err)
+      return
+    }
 
     if (rejected && this.reconnectAttempt === 0) {
       this.closeAll(err instanceof Error ? err : new ChannelNetworkError('Connection dropped'))
@@ -465,6 +810,21 @@ class ClientConnection implements MuxConnection {
     this.clearTimer('ttl')
     this.clearTimer('reconnectTimer')
     this.stopPing()
+    this.clearUpgradeTimeout()
+    this.upgrade.probeAbort?.()
+    this.upgrade.probeAbort = null
+    this.disposeCandidateTransport()
+    const retiringTransport = this.upgrade.retiringTransport
+    if (retiringTransport) {
+      retiringTransport.abandonActiveTransport()
+      retiringTransport.dispose()
+      this.upgrade.retiringTransport = null
+    }
+    this.upgrade.oldInboundClosed = false
+    this.upgrade.outboundCutoverPending = false
+    this.upgrade.outboundPromoted = false
+    this.upgrade.bufferedInboundFrames = null
+    this.upgrade.active = false
     this.transport.dispose()
     for (const replayBuffer of this.replayBuffers.values()) replayBuffer.dispose()
     for (const [, pending] of this.pendingAcks) pending.reject(new ChannelNetworkError('Connection closed'))
@@ -486,7 +846,8 @@ class ClientConnection implements MuxConnection {
     this[name] = null
   }
 
-  // Protocol internals (ported from old mux)
+  // ── Protocol internals ──
+
   buildReconcileFrame(): OutboundFrame {
     this.reconciling = true
     this.reconcileIxes = new Set()
@@ -671,21 +1032,85 @@ class ClientConnection implements MuxConnection {
 }
 
 class WsTransport implements ClientChannelTransport {
+  readonly type = CHANNEL_TRANSPORT.WS
   readonly reconnectTimeoutMessage = 'WebSocket reconnect timed out'
   readonly supportsPauseResume = true
   readonly sendReconcileOnOpen = true
-
+  readonly reconcileMode = 'release-after-reconciled' as const
+  private probedWs: WebSocket | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
+  private everOpened = false
+
+  private readonly wsUrl: string
 
   constructor(
-    private readonly wsUrl: string,
+    telefuncUrl: string,
     private readonly owner: ClientConnection,
-  ) {}
+  ) {
+    const base = typeof window === 'undefined' ? undefined : window.location.href
+    const url = new URL(telefuncUrl, base)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    this.wsUrl = url.href
+  }
+
+  async probe(): Promise<(() => void) | null> {
+    const ws = await new Promise<WebSocket | null>((resolve) => {
+      let ws: WebSocket
+      try {
+        ws = new WebSocket(this.wsUrl)
+      } catch {
+        resolve(null)
+        return
+      }
+      ws.binaryType = 'arraybuffer'
+      const timer = setTimeout(() => {
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+        ws.close()
+        resolve(null)
+      }, WS_PROBE_TIMEOUT_MS)
+      ws.onopen = () => ws.send(encodeCtrl({ t: 'ping' }))
+      ws.onmessage = ({ data }: MessageEvent) => {
+        const frame = decode(new Uint8Array(data as ArrayBuffer))
+        if (frame.tag === TAG.CTRL && frame.ctrl.t === 'pong') {
+          clearTimeout(timer)
+          ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+          resolve(ws)
+        }
+      }
+      ws.onclose = () => {
+        clearTimeout(timer)
+        resolve(null)
+      }
+      ws.onerror = () => {}
+    })
+    if (!ws) return null
+    this.probedWs = ws
+    return () => {
+      if (this.probedWs === ws) this.probedWs = null
+      try {
+        ws.close()
+      } catch {}
+    }
+  }
+
+  prepareForUpgrade(): Promise<void> {
+    return Promise.resolve()
+  }
 
   start(): void {
     if (this.connecting || this.ws) return
+
+    const wsProbed = this.probedWs
+    if (wsProbed) {
+      this.probedWs = null
+      this.ws = wsProbed
+      this.setupHandlers(wsProbed)
+      this.handleOpen(wsProbed)
+      return
+    }
+
     this.connecting = true
 
     let ws: WebSocket
@@ -693,31 +1118,37 @@ class WsTransport implements ClientChannelTransport {
       ws = new WebSocket(this.wsUrl)
     } catch {
       this.connecting = false
-      this.owner._onTransportClosed(false)
+      this.owner._onTransportClosed(this, false)
       return
     }
 
     this.ws = ws
     ws.binaryType = 'arraybuffer'
-    let opened = false
 
     ws.onopen = () => {
       if (this.ws !== ws) return
-      opened = true
-      this.connecting = false
-      this.owner._onTransportOpen()
+      this.handleOpen(ws)
     }
 
+    this.setupHandlers(ws)
+  }
+
+  private handleOpen(ws: WebSocket): void {
+    if (this.ws !== ws) return
+    this.everOpened = true
+    this.connecting = false
+    this.owner._onTransportOpen(this)
+  }
+
+  private setupHandlers(ws: WebSocket): void {
     ws.onmessage = ({ data }: MessageEvent) => {
-      this.owner._onTransportFrame(new Uint8Array(data as ArrayBuffer))
+      this.owner._onTransportFrame(this, new Uint8Array(data as ArrayBuffer))
     }
-
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
       this.connecting = false
-      this.owner._onTransportClosed(!opened)
+      this.owner._onTransportClosed(this, !this.everOpened)
     }
-
     ws.onerror = () => {}
   }
 
@@ -745,7 +1176,7 @@ class WsTransport implements ClientChannelTransport {
     ws.onmessage = ({ data }: MessageEvent) => {
       const frame = decode(new Uint8Array(data as ArrayBuffer))
       if (frame.tag === TAG.TEXT || frame.tag === TAG.BINARY) {
-        this.owner._onTransportFrame(new Uint8Array(data as ArrayBuffer))
+        this.owner._onTransportFrame(this, new Uint8Array(data as ArrayBuffer))
       }
     }
   }
@@ -764,6 +1195,14 @@ class WsTransport implements ClientChannelTransport {
 
   dispose(): void {
     this.connecting = false
+    const wsProbed = this.probedWs
+    this.probedWs = null
+    if (wsProbed) {
+      wsProbed.onopen = wsProbed.onmessage = wsProbed.onerror = wsProbed.onclose = null
+      try {
+        wsProbed.close(1000)
+      } catch {}
+    }
     const ws = this.ws
     this.ws = null
     if (ws) {
@@ -777,9 +1216,14 @@ class WsTransport implements ClientChannelTransport {
 }
 
 class SseTransport implements ClientChannelTransport {
+  readonly type = CHANNEL_TRANSPORT.SSE
   readonly reconnectTimeoutMessage = 'SSE reconnect timed out'
   readonly supportsPauseResume = false
   readonly sendReconcileOnOpen = false
+  readonly reconcileMode = 'batch-on-reconcile' as const
+  async probe(): Promise<(() => void) | null> {
+    throw new Error('SSE transport does not implement probe()')
+  }
 
   private readonly connId = crypto.randomUUID()
   private connecting = false
@@ -797,6 +1241,7 @@ class SseTransport implements ClientChannelTransport {
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
+  private drainCallbacks: Array<() => void> = []
 
   constructor(
     private readonly telefuncUrl: string,
@@ -807,6 +1252,13 @@ class SseTransport implements ClientChannelTransport {
   }
 
   private readonly fetchImpl: typeof fetch
+
+  prepareForUpgrade(): Promise<void> {
+    if (!this.flushing && this.outboxFrames.length === 0) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      this.drainCallbacks.push(resolve)
+    })
+  }
 
   start(): void {
     if (this.connecting || this.streamAbort) return
@@ -861,7 +1313,7 @@ class SseTransport implements ClientChannelTransport {
       this.rollbackInitialBatch(stage)
       if (this.streamAbort === abortController) this.streamAbort = null
       this.connecting = false
-      this.owner._onTransportClosed(false)
+      this.owner._onTransportClosed(this, false)
       return
     }
 
@@ -869,13 +1321,13 @@ class SseTransport implements ClientChannelTransport {
       this.rollbackInitialBatch(stage)
       if (this.streamAbort === abortController) this.streamAbort = null
       this.connecting = false
-      this.owner._onTransportClosed(true)
+      this.owner._onTransportClosed(this, true)
       return
     }
 
     this.connecting = false
     this.streamAbort = abortController
-    this.owner._onTransportOpen()
+    this.owner._onTransportOpen(this)
     if (this.outboxFrames.length > 0) void this.flushOutbox()
 
     const reader = createSseEventStreamReader(response.body.getReader(), abortController)
@@ -883,14 +1335,14 @@ class SseTransport implements ClientChannelTransport {
       while (true) {
         const entry = await reader.readNextEntry()
         if (!entry) break
-        if (entry.frame) this.owner._onTransportFrame(entry.frame)
+        if (entry.frame) this.owner._onTransportFrame(this, entry.frame)
       }
     } catch {
       if (abortController.signal.aborted) return
     } finally {
       reader.cancel()
       if (this.streamAbort === abortController) this.streamAbort = null
-      if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(false)
+      if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this, false)
     }
   }
 
@@ -941,12 +1393,17 @@ class SseTransport implements ClientChannelTransport {
         this.outboxFrames = queuedFrames.concat(this.outboxFrames)
         this.outboxDeadlines = queuedDeadlines.concat(this.outboxDeadlines)
         this.abandonActiveTransport()
-        this.owner._onTransportClosed(false)
+        this.owner._onTransportClosed(this, false)
         return
       }
     } finally {
       this.flushing = false
-      if (this.outboxFrames.length > 0) this.scheduleFlush()
+      if (this.outboxFrames.length > 0) {
+        this.scheduleFlush()
+      } else {
+        const cbs = this.drainCallbacks.splice(0)
+        for (const cb of cbs) cb()
+      }
     }
   }
 
@@ -982,6 +1439,8 @@ class SseTransport implements ClientChannelTransport {
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
     this.abandonedControllers.add(abortController)
+    const cbs = this.drainCallbacks.splice(0)
+    for (const cb of cbs) cb()
   }
 
   closeAbandonedTransport(): void {
@@ -991,7 +1450,7 @@ class SseTransport implements ClientChannelTransport {
     abortController.abort()
   }
 
-  applyReconciledSettings(ctrl: CtrlReconciled): void {
+  applyReconciledSettings(ctrl: CtrlSettings): void {
     if (ctrl.sseFlushThrottle) this.flushThrottleMs = ctrl.sseFlushThrottle
     if (ctrl.ssePostIdleFlushDelay) this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
     this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
@@ -1009,7 +1468,25 @@ class SseTransport implements ClientChannelTransport {
     this.streamAbort?.abort()
     this.streamAbort = null
     this.closeAbandonedTransport()
+    const cbs = this.drainCallbacks.splice(0)
+    for (const cb of cbs) cb()
   }
+}
+
+// ── Transport registry ──
+
+/** Maps each ChannelTransport to a factory that creates the corresponding ClientChannelTransport. */
+const TRANSPORT_REGISTRY: Record<
+  ChannelTransport,
+  (telefuncUrl: string, options: ClientConnectionOptions, owner: ClientConnection) => ClientChannelTransport
+> = {
+  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
+  [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) => new SseTransport(telefuncUrl, options.fetchImpl, owner),
+}
+
+/** Defines which transport can upgrade to which. */
+const UPGRADE_PATH: Partial<Record<ChannelTransport, ChannelTransport>> = {
+  [CHANNEL_TRANSPORT.SSE]: CHANNEL_TRANSPORT.WS,
 }
 
 function createSseEventStreamReader(

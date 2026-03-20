@@ -1,7 +1,8 @@
 export { TAG, encode, decode, encodeCtrl }
-export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled }
+export type { AckResultStatus, CtrlMessage, CtrlReconcile, CtrlReconciled, CtrlUpgrade, CtrlUpgraded, CtrlSettings }
 
 import { assert } from '../utils/assert.js'
+import type { ChannelTransports } from './constants.js'
 
 // ===== WebSocket Wire Protocol =====
 //
@@ -60,11 +61,12 @@ type CtrlReconcile = {
   sessionId?: string
   open: { id: string; ix: number; lastSeq: number; defer?: boolean }[]
 }
-/** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
-type CtrlReconciled = {
-  t: 'reconciled'
+/** Client → server on a new transport during seamless handoff. */
+type CtrlUpgrade = {
+  t: 'upgrade'
   sessionId: string
-  open: { id: string; ix: number; lastSeq: number }[]
+}
+type CtrlSettings = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
@@ -72,6 +74,29 @@ type CtrlReconciled = {
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
+/** Server → client after reconcile: all channels the server actually attached, with lastSeq the server received per channel. */
+type CtrlReconciled = CtrlSettings & {
+  t: 'reconciled'
+  sessionId: string
+  open: { id: string; ix: number; lastSeq: number }[]
+  transports: ChannelTransports
+}
+/**
+ * Server -> client after upgrade negotiation.
+ *
+ * The new transport is staged and bound to the session, but the old transport may
+ * still own one or both traffic directions until the directional `fin` handoff is
+ * completed.
+ */
+type CtrlUpgraded = CtrlSettings & {
+  t: 'upgraded'
+  sessionId: string
+}
+/** Upgrade handoff marker.
+ *  Client -> server on the old transport: no more client->server frames will be sent on this transport.
+ *  Server -> client on the old transport: no more server->client frames will be sent on this transport.
+ */
+type CtrlFin = { t: 'fin' }
 type CtrlMessage =
   | CtrlClose
   | CtrlCloseAck
@@ -82,7 +107,10 @@ type CtrlMessage =
   | CtrlPing
   | CtrlPong
   | CtrlReconcile
+  | CtrlUpgrade
   | CtrlReconciled
+  | CtrlUpgraded
+  | CtrlFin
 
 type AckResultStatus = 'ok' | 'error' | 'abort'
 

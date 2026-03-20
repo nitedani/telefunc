@@ -56,7 +56,15 @@ export const DEFAULT_STREAM_TRANSPORT: StreamTransport = STREAM_TRANSPORT.BINARY
 
 /** Transport for persistent channels created with `createChannel()`. */
 export type ChannelTransport = (typeof CHANNEL_TRANSPORT)[keyof typeof CHANNEL_TRANSPORT]
-export const DEFAULT_CHANNEL_TRANSPORT: ChannelTransport = CHANNEL_TRANSPORT.SSE
+/** Ordered list of transports to use for channels. `['sse', 'ws']` starts on SSE and upgrades to WebSocket. */
+export type ChannelTransports = ChannelTransport[]
+/** Default transports the client tries, in order. Starts on SSE and upgrades to WS if available. */
+export const DEFAULT_CLIENT_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE, CHANNEL_TRANSPORT.WS]
+/** Default transports enabled on the server. SSE only until a WS adapter calls enableChannelTransports. */
+export const DEFAULT_SERVER_CHANNEL_TRANSPORTS: ChannelTransports = [CHANNEL_TRANSPORT.SSE]
+
+/** How long to wait for a WebSocket probe ping/pong before giving up on the upgrade. */
+export const WS_PROBE_TIMEOUT_MS = 3_000
 
 // ===== Multiplexed SSE transport =====
 
@@ -74,6 +82,8 @@ export const SSE_RECONCILE_DEADLINE_MS = 10
 export const CHANNEL_RECONNECT_TIMEOUT_MS = 60_000
 export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
+/** How long to wait for an in-progress transport upgrade step before falling back safely. */
+export const CHANNEL_UPGRADE_TIMEOUT_MS = CHANNEL_PING_INTERVAL_MS * 2
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000
 export const CHANNEL_CLOSE_TIMEOUT_MS = 5_000
 export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 256 * 1024
