@@ -12,7 +12,7 @@ function pluginTransformTelefuncFiles(): Plugin[] {
   return [
     {
       name: 'telefunc:pluginTransformTelefuncFiles',
-      enforce: 'pre',
+      enforce: 'pre', // TODO: also use `order: 'pre'`
       configResolved: {
         handler(config) {
           root = toPosixPath(config.root)
