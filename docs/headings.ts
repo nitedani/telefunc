@@ -20,7 +20,38 @@ type CategoryNames = ExtractCategoryName<(typeof categories)[number]>
 
 const categories = ['Guides', 'API', 'Get Started', 'Overview', 'Miscellaneous'] as const satisfies Config['categories']
 
+<<<<<<< Updated upstream
 const headingsDetached = [...misc()] satisfies HeadingDetachedDefinition[]
+=======
+const headingsDetached = [
+  {
+    title: 'Cloudflare Workers',
+    url: '/cloudflare',
+    category: 'API',
+  },
+  {
+    title: '`@telefunc/drizzle`',
+    url: '/integrations/drizzle',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/rxjs`',
+    url: '/integrations/rxjs',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/tanstack-query`',
+    url: '/integrations/tanstack-query',
+    category: 'Guides',
+  },
+  {
+    title: '`@telefunc/redis`',
+    url: '/integrations/redis',
+    category: 'Guides',
+  },
+  ...misc(),
+] satisfies HeadingDetachedDefinition[]
+>>>>>>> Stashed changes
 
 const headings = [
   {

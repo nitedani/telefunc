@@ -1,0 +1,198 @@
+import { Link } from '@brillout/docpress'
+
+Invalidate [TanStack Query](https://tanstack.com/query) queries after mutations — locally or across all connected clients.
+
+
+## Install
+
+```shell
+npm install @telefunc/tanstack-query
+```
+
+Wrap your `QueryClient` with `withTelefunc()`:
+
+```tsx
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { withTelefunc } from '@telefunc/tanstack-query'
+
+const queryClient = withTelefunc(new QueryClient())
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MyApp />
+    </QueryClientProvider>
+  )
+}
+```
+
+`withTelefunc()` returns the same `QueryClient` instance. All options and APIs keep working as-is.
+
+> The integration lives in `QueryClient` (the peer dependency is `@tanstack/query-core` v5+), so any TanStack Query adapter works: React, Vue, Svelte, Solid. The examples above use React.
+
+> There's no server-side setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads their server extension.
+
+
+## Local vs global keys
+
+Keys prefixed with `global:` invalidate through the server — every connected client with a matching query refetches. All other keys invalidate locally (current tab only).
+
+```tsx
+queryKey: ['todos']                              // local — current tab only
+queryKey: ['global:todos', `user:${userId}`]     // global — all clients with a matching query refetch
+queryKey: ['global:documents', docId]            // global
+```
+
+> A key is global when its *first* element is a string starting with `global:`, e.g. `['todos', 'global:x']` is a local key.
+
+> Global keys ride on Telefunc calls, so two rules apply:
+>
+> - **`queryFn` must call a telefunction.** The invalidation subscription piggybacks on that call. With a non-telefunc `queryFn` (e.g. plain `fetch()`), a global key silently behaves like a local one. The same goes for mutations: global keys in `meta.invalidates` are published server-side after the telefunction succeeds, so `mutationFn` must be a telefunction call too.
+> - **Return the telefunction call directly.** The integration unwraps the subscription from whatever `queryFn` returns, so transform with `select` instead:
+>   ```tsx
+>   // ✗ Broken: inside queryFn, getTodos() resolves to an internal wrapper
+>   queryFn: async () => (await getTodos()).items
+>
+>   // ✓ Return the call directly, transform with select
+>   queryFn: () => getTodos(),
+>   select: (todos) => todos.items,
+>   ```
+
+
+## Mutations
+
+Use `meta.invalidates` on mutations to invalidate matching queries after the mutation succeeds.
+
+> The `invalidates` field is a `@telefunc/tanstack-query` convention: TanStack Query itself attaches no behavior to `meta`.
+
+```tsx
+const { data: todos } = useQuery({
+  queryKey: ['todos'],
+  queryFn: () => getTodos(),
+})
+
+const add = useMutation({
+  mutationFn: (text: string) => addTodo(text),
+  meta: { invalidates: [['todos']] },
+})
+```
+
+Global keys work the same way — when a collaborator edits a document, every client viewing it refetches:
+
+```tsx
+const { data: doc } = useQuery({
+  queryKey: ['global:documents', docId],
+  queryFn: () => getDocument(docId),
+})
+
+const edit = useMutation({
+  mutationFn: (content: string) => updateDocument(docId, content),
+  meta: { invalidates: [['global:documents', docId]] },
+})
+```
+
+Local and global keys can be mixed in a single mutation:
+
+```js
+meta: {
+  invalidates: [
+    ['my-drafts'],            // local — this client only
+    ['global:documents'],     // global — every connected client
+  ],
+}
+```
+
+
+## Server-side invalidation
+
+For changes not triggered by a client mutation (background jobs, webhooks, other services), use `invalidate()` directly. This only works with global keys since it broadcasts to all clients:
+
+```ts
+import { invalidate } from '@telefunc/tanstack-query/server'
+
+// e.g. a CMS publishes new content
+invalidate(['global:articles'])
+
+// a specific document was updated
+invalidate(['global:documents', docId])
+```
+
+Prefix matching — invalidating `['global:documents']` hits `['global:documents', docId]` too. Same behavior as TanStack Query's [`invalidateQueries`](https://tanstack.com/query/latest/docs/framework/react/guides/query-keys).
+
+
+## Custom change sources
+
+When the database itself reports changes (Postgres `LISTEN`/`NOTIFY`, CDC, an ORM hook), drive a query's invalidation from that source directly with `useInvalidate()`. For example with [Drizzle](https://orm.drizzle.team) and [postgres.js](https://github.com/porsager/postgres), using Postgres `LISTEN`/`NOTIFY` as the change source:
+
+```ts
+// db.ts
+import postgres from 'postgres'
+import { drizzle } from 'drizzle-orm/postgres-js'
+
+export const sql = postgres(process.env.DATABASE_URL)
+export const db = drizzle(sql)
+```
+
+```ts
+// todos.telefunc.ts
+import { useInvalidate } from '@telefunc/tanstack-query/server'
+import { getContext } from 'telefunc'
+import { db, sql } from './db.js'
+
+export async function getTodos() {
+  const { user, signal } = getContext()
+  const invalidate = useInvalidate()
+
+  const { unlisten } = await sql.listen(`todos_user_${user.id}`, invalidate)
+  signal.addEventListener('abort', unlisten, { once: true })
+
+  return await db.select().from(todos).where(eq(todos.userId, user.id))
+}
+
+export async function addTodo(text: string) {
+  const { user } = getContext()
+  await db.insert(todos).values({ text, userId: user.id })
+  await sql.notify(`todos_user_${user.id}`, '')
+}
+```
+
+```ts
+// TodoList.tsx: a plain local key, every session of this user stays in sync
+const { data: todos } = useQuery({
+  queryKey: ['todos'],
+  queryFn: () => getTodos(),
+})
+```
+
+`useInvalidate()` returns a trigger that refetches this query on the calling client. It's bound to the current telefunction call, so it stays valid inside event listeners that fire long after the telefunction returned. Calling `useInvalidate()` also marks the query live: the response carries the invalidation channel, so the query key doesn't need the `global:` prefix.
+
+- Remove the listener when the client unsubscribes (query removed from cache, refetch, disconnect): wire the unlisten function to `signal` as above, or register it with `onClose`.
+- A change firing between the database read and the channel setup isn't lost: the trigger buffers it and delivers once the channel exists.
+- On a global-key query, the trigger adds a second invalidation path next to the key-based one: `invalidate(['global:todos'])` and global keys in `meta.invalidates` keep working for the same query.
+- The change listener and the client's channel live on the same server instance, so this works across multiple servers without a broadcast transport, provided the change source fires on every instance (for example one `LISTEN` connection per server).
+
+With Drizzle, none of this is hand-written: <Link text={<code>@telefunc/drizzle</code>} href="/integrations/drizzle" /> detects which queries a database change affects and wires the triggers automatically.
+
+
+## How it works
+
+**Local keys:**
+1. Mutation succeeds.
+2. `withTelefunc()` calls `invalidateQueries()` on the current client for matching local keys.
+
+**Global keys:**
+1. `withTelefunc()` sends each query's `queryKey` alongside the telefunc call. The server returns an invalidation channel only when the key is global or the telefunction called `useInvalidate()`.
+2. The telefunction executes (including auth). Only after it succeeds, the server subscribes to invalidation events for that key.
+3. Mutations work the same way — the telefunction runs first, then global keys from `meta.invalidates` are published through <Link text={<code>Broadcast</code>} href="/channel#new-broadcast" />.
+4. Every connected client with a matching subscription calls `invalidateQueries()`.
+
+> Works across multiple servers via a <Link text="broadcast transport" href="/channel#multi-server" /> such as <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} />.
+
+
+## See also
+
+- <Link href="/integrations/drizzle" /> — automatic invalidation from database changes
+- <Link href="/channel" /> — `Channel` and `Broadcast`
+- <Link href="/integrations/redis" text={<code>@telefunc/redis</code>} /> — multi-server pub/sub
+- <Link href="/real-time" /> — real-time patterns
+- <Link href="/cloudflare" /> — Cloudflare Workers

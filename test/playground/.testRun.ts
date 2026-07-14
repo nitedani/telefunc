@@ -3,6 +3,20 @@ export { testRun }
 import { page, test, expect, expectLog, run, getServerUrl, autoRetry, fetchHtml } from '@brillout/test-e2e'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
+<<<<<<< Updated upstream
+=======
+import { testFileDownload } from './pages/file-download/e2e-test'
+import { testStreaming } from './pages/streaming/e2e-test'
+import { testAbort } from './pages/abort/e2e-test'
+import { testClose } from './pages/close/e2e-test'
+import { testChannel } from './pages/channel/e2e-test'
+import { testFunction } from './pages/function/e2e-test'
+import { testStreamToServer } from './pages/stream-to-server/e2e-test'
+import { testLiveQuery } from './pages/live-query/e2e-test'
+import { testReactive } from './pages/reactive/e2e-test'
+import { testRxjs } from './pages/rxjs/e2e-test'
+import { testPublish } from './pages/publish/e2e-test'
+>>>>>>> Stashed changes
 
 function testRun(cmd: 'npm run dev' | 'npm run preview') {
   run(cmd, {
@@ -35,6 +49,31 @@ function testRun(cmd: 'npm run dev' | 'npm run preview') {
 
   testFileUpload()
 
+<<<<<<< Updated upstream
+=======
+  testFileDownload()
+
+  testStreaming()
+
+  testAbort()
+
+  testClose()
+
+  testChannel(isDev)
+
+  testFunction()
+
+  testStreamToServer()
+
+  testLiveQuery()
+
+  testReactive()
+
+  testRxjs()
+
+  testPublish()
+
+>>>>>>> Stashed changes
   if (!isDev) {
     test('shield() generation', async () => {
       {

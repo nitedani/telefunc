@@ -1,0 +1,86 @@
+import { Link } from '@brillout/docpress'
+
+Reactive queries for [Drizzle](https://orm.drizzle.team): write a normal Drizzle query inside a telefunction, and every connected client whose query result a database change affects refetches. No `global:` keys, no `meta.invalidates`, no `invalidate()` calls.
+
+## Setup
+
+Wrap your drizzle instance with `reactiveDrizzle()`:
+
+```ts
+// db.ts (server)
+import 'telefunc/async_hooks'
+import { reactiveDrizzle } from '@telefunc/drizzle'
+import { drizzle } from 'drizzle-orm/node-postgres'
+import pg from 'pg'
+
+export const db = reactiveDrizzle(drizzle(new pg.Pool({ connectionString: process.env.DATABASE_URL })))
+```
+
+On the client, use <Link text={<code>withTelefunc()</code>} href="/integrations/tanstack-query" /> from `@telefunc/tanstack-query`; invalidations travel over its channel.
+
+The `telefunc/async_hooks` import is required: it lets `reactiveDrizzle()` link each query to the telefunction call it runs in.
+
+## Usage
+
+There is nothing to annotate. Queries are plain Drizzle, writes are plain writes, query keys are plain local keys:
+
+```ts
+// todos.telefunc.ts
+import { eq } from 'drizzle-orm'
+import { db, todos } from './db'
+
+export async function getTodos(team: string) {
+  return await db.select().from(todos).where(eq(todos.team, team))
+}
+
+export async function addTodo(team: string, text: string) {
+  await db.insert(todos).values({ team, text })
+}
+```
+
+```tsx
+// TodoList.tsx
+const { data } = useQuery({ queryKey: ['todos', team], queryFn: () => getTodos(team) })
+const add = useMutation({ mutationFn: (text: string) => addTodo(team, text) })
+```
+
+When anyone calls `addTodo('red', ...)`, every client whose `getTodos` result gains that row refetches. Clients watching `team = 'blue'` are not refetched: the row change is evaluated against each subscribed query's WHERE clause.
+
+## Change detection
+
+**Postgres** (node-postgres or postgres.js): changes are read from the write-ahead log through a logical replication slot. This catches writes from any source, including other services and raw SQL, and it makes Postgres itself the multi-server fan-out; no broadcast transport is needed. Requirements:
+
+- `wal_level = logical` in the server config (`postgres -c wal_level=logical`).
+- `ALTER TABLE ... REPLICA IDENTITY FULL` on watched tables, so updates and deletes carry the old row. Without it they still invalidate, but every query on the table refetches instead of only the affected ones.
+- One replication slot per server instance: `reactiveDrizzle(db, { cdc: { slot: 'app_' + instanceId } })`. The publication and slot are created automatically on startup.
+
+Opt out with `reactiveDrizzle(db, { cdc: false })`.
+
+**Other databases** (SQLite, MySQL, or Postgres with `cdc: false`): writes are intercepted on the wrapped instance itself. Inserts report their values, updates and deletes read the affected rows with the write's own WHERE before executing. Writes inside a telefunction flush as one batch when it settles; `db.transaction()` emits on commit and discards on rollback; for writes outside a telefunction (cron jobs), `db.batch(callback)` groups them. Across multiple servers, changes fan out over a <Link text="broadcast transport" href="/channel#multi-server" />. Only builder-API writes are seen: raw `db.execute()` statements and writes from other processes are invisible in this mode.
+
+## Precision
+
+Each subscribed query compiles into an incremental dataflow graph ([d2ts](https://github.com/electric-sql/d2ts)); identical queries share one graph. Row changes are evaluated against it, so a write only invalidates the queries whose results it changes:
+
+- WHERE operators (`eq`, `gt`, `inArray`, `like`, `between`, `and`/`or`/`not`, ...) filter row-precisely.
+- Equi-joins maintain join state, seeded from the database when the graph is created.
+- `groupBy` with `count`/`sum`/`avg`/`min`/`max` re-aggregates incrementally; HAVING filters groups.
+- `orderBy` + `limit`/`offset` maintain a top-K window.
+- DISTINCT and UNION ALL map directly.
+
+Anything that doesn't compile precisely (raw `sql\`\``, subqueries, window functions, non-equi joins) degrades to firing on any change to the tables it references. Degradation only ever widens invalidation; a real change is never missed.
+
+Not tracked at all: the relational API (`db.query.*`) and raw `db.execute()` reads. Queries through them work normally but don't subscribe.
+
+## How it works
+
+1. A telefunction awaits `db.select()...`: the query's graph is looked up or created, and the call subscribes to it before the read executes, so no change can fall between the two.
+2. The result travels to the client with an invalidation channel attached (the <Link text="@telefunc/tanstack-query" href="/integrations/tanstack-query" /> machinery; the query key stays local).
+3. Change detection feeds row changes into the affected graphs as multiset deltas (insert `+1`, delete `-1`, update both). A transaction is one batch: each graph fires at most once per batch.
+4. When a graph's output changes, every subscribed client refetches. Subscriptions end with the query (cache removal, refetch, disconnect); a graph is destroyed with its last subscriber.
+
+## See also
+
+- <Link href="/integrations/tanstack-query" /> — the client half
+- <Link href="/channel" /> — `Channel` and `Broadcast`
+- <Link href="/cloudflare" /> — Cloudflare Workers

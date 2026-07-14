@@ -1,0 +1,50 @@
+{
+  "name": "@telefunc/drizzle",
+  "version": "0.1.0",
+  "description": "Reactive queries for Drizzle. Write a normal Drizzle query inside a telefunction; connected clients refetch automatically when the database changes.",
+  "homepage": "https://github.com/brillout/telefunc/tree/main/packages/drizzle#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brillout/telefunc.git",
+    "directory": "packages/drizzle"
+  },
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@electric-sql/d2ts": "^0.1.8"
+  },
+  "peerDependencies": {
+    "@telefunc/tanstack-query": ">=0.1.0",
+    "drizzle-orm": ">=0.40.0",
+    "pg-logical-replication": "^2.5.0",
+    "telefunc": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "pg-logical-replication": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@telefunc/tanstack-query": "workspace:*",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.4.1",
+    "drizzle-orm": "^0.45.2",
+    "pg-logical-replication": "^2.5.0",
+    "telefunc": "workspace:*",
+    "typescript": "^5.9.2"
+  }
+}

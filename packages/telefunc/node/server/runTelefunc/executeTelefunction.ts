@@ -58,5 +58,22 @@ async function executeTelefunction(runContext: {
     }
   }
 
+<<<<<<< Updated upstream
   return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionError }
+=======
+  runContext.requestContext.markTelefunctionSettled()
+
+  if (!telefunctionHasErrored && !telefunctionAborted) {
+    for (const ext of extensions) {
+      if (ext.hooks?.onTelefunctionResult && requestExtensions[ext.name]) {
+        const data = requestExtensions[ext.name]!
+        telefunctionReturn = await withContext(() =>
+          ext.hooks!.onTelefunctionResult!({ result: telefunctionReturn, data }),
+        )
+      }
+    }
+  }
+
+  return { telefunctionReturn, telefunctionAborted, telefunctionHasErrored, telefunctionTopLevelError }
+>>>>>>> Stashed changes
 }
