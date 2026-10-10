@@ -43,6 +43,9 @@ class PieceSender {
   /** The bytes waiting for a probe's acknowledgement. */
   heldBytes = 0
   private pingInterval = 0
+  /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
+   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, what a probe carries. */
+  private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
   /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed.
@@ -59,28 +62,34 @@ class PieceSender {
   /** Sends `frame`, whole or in pieces. */
   send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
     this.sentBytes += frame.byteLength
-    this.pingInterval = pingInterval
+    if (pingInterval !== this.pingInterval) {
+      this.pingInterval = pingInterval
+      this.setWholeUpTo()
+    }
     // A PIECES_ACK passes what waits: the probe its peer waits on may be its own.
-    if (this.probe === null || frame[0] === TAG.PIECES_ACK) return this.transmitFrom(frame, 0)
+    if (this.probe === null || frame[0] === TAG.PIECES_ACK) return this.pass(frame)
     this.held.push(frame)
     this.heldBytes += frame.byteLength
   }
 
-  /** Hands the socket `frame` from `offset`, whole or in pieces. */
-  private transmitFrom(frame: Uint8Array<ArrayBuffer>, offset: number): void {
+  /** Hands the socket `frame`, whole or in pieces. */
+  private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
     if (bytes > this.largest) this.largest = bytes
-    const wholeUpTo = this.wholeUpTo()
-    if (offset === 0 && bytes <= wholeUpTo) {
-      this.transmittedBytes += bytes
-      if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
-      return this.transmit(frame)
-    }
+    if (bytes > this.wholeUpTo) return this.cut(frame, 0)
+    this.transmittedBytes += bytes
+    if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
+    this.transmit(frame)
+  }
+
+  /** Hands the socket `frame` from `offset` in pieces. */
+  private cut(frame: Uint8Array<ArrayBuffer>, offset: number): void {
+    const bytes = frame.byteLength
     const now = performance.now()
     // The first is empty: its receiver hears of the frame at once, before the first piece of it can cross.
     if (offset === 0) this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
     if (this.fastest === 0) return this.sendProbe(frame, now)
-    const size = Math.max(1, Math.floor(wholeUpTo))
+    const size = Math.max(1, Math.floor(this.wholeUpTo))
     this.transmittedBytes += bytes - offset
     if (acknowledges(bytes)) this.track(bytes - offset, now, false)
     for (let at = offset; at < bytes; at += size) this.transmit(encode.piece(bytes, frame.subarray(at, at + size)))
@@ -115,20 +124,20 @@ class PieceSender {
     })
   }
 
-  /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
-   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, what a probe carries. */
-  private wholeUpTo(): number {
-    if (this.fastest === 0) return this.probeCarries()
-    return (this.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN
-  }
-
-  private probeCarries(): number {
-    return this.slow ? WIRE_PROBE_BYTES : 2 * WIRE_PROBE_PAIR_BYTES
+  /** Sets `wholeUpTo` by the rate, the ping interval, and whether the link is known slow. */
+  private setWholeUpTo(): void {
+    this.wholeUpTo =
+      this.fastest > 0
+        ? (this.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN
+        : this.slow
+          ? WIRE_PROBE_BYTES
+          : 2 * WIRE_PROBE_PAIR_BYTES
   }
 
   /** Probes with one small piece, until a measured rate says otherwise. */
   markSlow(): void {
     this.slow = true
+    this.setWholeUpTo()
   }
 
   /** Whether its receiver hasn't acknowledged a probe, or a frame cut by a lapsed rate. */
@@ -166,6 +175,7 @@ class PieceSender {
     if (!(rate > this.fastest) && !this.lapsed(at)) return
     this.fastest = rate
     this.roseAt = at
+    this.setWholeUpTo()
   }
 
   private lapsed(at: number): boolean {
@@ -177,11 +187,11 @@ class PieceSender {
     const { frame, offset } = this.rest!
     this.probe = this.rest = null
     this.heldBytes -= frame.byteLength - offset
-    this.transmitFrom(frame, offset)
+    this.cut(frame, offset)
     while (this.probe === null && this.held.length > 0) {
       const next = this.held.shift()!
       this.heldBytes -= next.byteLength
-      this.transmitFrom(next, 0)
+      this.pass(next)
     }
   }
 }
