@@ -516,7 +516,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const data = parsePeerText(text) as ChannelData<ClientToServer>
       const validateData = this._validators.get('data')
       // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
@@ -564,7 +564,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     const bytes = data.byteLength
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {

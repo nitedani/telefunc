@@ -27,7 +27,7 @@ const LATENCY_MS = 5
 /** What a socket read hands over at once; the receiver's microtasks run between two reads. */
 const READ_BYTES = 64 * 1024
 
-/** One direction of a wire: a frame leaves once the one before it has, and arrives `LATENCY_MS` after it left. */
+/** One direction of a wire: a frame leaves once the one before it has, and arrives `latencyMs` after it left. */
 class Pipe {
   private queue: { frame: Uint8Array<ArrayBuffer>; at: number }[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -36,11 +36,12 @@ class Pipe {
   bytes = 0
   /** A slow link carries a frame only once the one before it has gone through. */
   bytesPerMs = Infinity
+  latencyMs = LATENCY_MS
   private lastAt = 0
   constructor(private readonly deliver: (frame: Uint8Array<ArrayBuffer>) => void) {}
   push(frame: Uint8Array<ArrayBuffer>): void {
     this.lastAt = Math.max(Date.now(), this.lastAt) + frame.byteLength / this.bytesPerMs
-    this.queue.push({ frame, at: this.lastAt + LATENCY_MS })
+    this.queue.push({ frame, at: this.lastAt + this.latencyMs })
     this.bytes += frame.byteLength
     this.schedule()
   }
@@ -868,6 +869,25 @@ test("on an uplink slower than a quarter window per pong deadline, an upload's p
 
 // The page's socket here reports nothing it holds, as a browser's does of what its network stack and kernel hold: a
 // WebSocket's bufferedAmount reads 0 in Chromium while more than a megabyte of the upload waits below it.
+test("a download whose path's round trip rises on its wire grows its window to carry the link's rate", async () => {
+  const feed = loop.open<never, Uint8Array>()
+  let got = 0
+  feed.page.listenBinary((data) => void (got += data.byteLength))
+  await run(1_000)
+  loop.socket.toPage.bytesPerMs = 20_000
+  void (async () => {
+    while (!feed.server.isClosed) await feed.server.sendBinary(new Uint8Array(64 * KIB))
+  })()
+  await run(3_000)
+  // 20 MB/s over a 200 ms round trip: 4 MB in flight, twice the window the 10 ms round trip measured at attach kept.
+  for (const pipe of [loop.socket.toPage, loop.socket.toServer]) pipe.latencyMs = 100
+  await run(5_000)
+  const before = got
+  await run(5_000)
+  expect((got - before) / 5_000).toBeGreaterThan(0.9 * 20_000)
+  expect(loop.sockets).toHaveLength(1)
+})
+
 test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's socket reports it holds", async () => {
   const feed = loop.open<string, never>()
   const server = consume(feed.server)

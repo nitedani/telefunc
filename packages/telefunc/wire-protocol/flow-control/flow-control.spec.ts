@@ -269,8 +269,8 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
 
   it('byte-refresh threshold scales with the adaptive window', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
     flow.onPingAck(emit.probe, true, Infinity)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
@@ -290,21 +290,21 @@ describe('FlowControl — BDP integration', () => {
   // The sample is bytes arriving *between* ping-send and ack-arrival. Cycle
   // fires the probe (one onReceived), accumulates (a second), settles.
   const cycle = ({ flow, emit }: { flow: FlowControl; emit: Emit }, sampleBytes: number) => {
-    flow.onReceived(1)
-    flow.onReceived(sampleBytes)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(sampleBytes, performance.now())
     flow.onPingAck(emit.probe, true, Infinity)
   }
 
   it('emits BDP_PING on the first onReceived', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024)
+    flow.onReceived(1024, performance.now())
     expect(emit.bdpPingCalls).toBe(1)
   })
 
   it('does not emit a second BDP_PING while one is in flight', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024)
-    flow.onReceived(1024)
+    flow.onReceived(1024, performance.now())
+    flow.onReceived(1024, performance.now())
     expect(emit.bdpPingCalls).toBe(1)
   })
 
@@ -376,8 +376,8 @@ describe('FlowControl — whether the window starved the wire', () => {
 
   it('grows its own window only on an ack that says the window starved the peer', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
     flow.onPingAck(emit.probe, false, Infinity)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
@@ -390,8 +390,8 @@ describe('FlowControl — reattach', () => {
   it('keeps credit and the grown receive window, and advertises the limits again', () => {
     const { flow, emit } = makeFlow()
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
     flow.onPingAck(emit.probe, true, Infinity)
     const grownWindow = flow.byteWindow
     expect(grownWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
@@ -430,11 +430,11 @@ describe('FlowControl — reattach', () => {
   // prior wire and won't arrive). A fresh ping must be allowed to fire next.
   it('drops the in-flight BDP ping so the next receive can fire a fresh one', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024) // first ping in flight
+    flow.onReceived(1024, performance.now()) // first ping in flight
     expect(emit.bdpPingCalls).toBe(1)
     flow.reattach()
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    flow.onReceived(1024)
+    flow.onReceived(1024, performance.now())
     expect(emit.bdpPingCalls).toBe(2)
   })
 
@@ -474,7 +474,7 @@ describe('FlowControl — replay buffers', () => {
     const emit = makeEmit()
     const flow = new FlowControl(emit, () => 0)
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
     flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES)
     flow.reattach()
     expect(emit.windowCalls).toEqual([])
@@ -513,7 +513,7 @@ describe('FlowControl — replay buffers', () => {
     const { flow, emit } = makeFlow()
     flow.acknowledge()
     expect(emit.windowCalls).toEqual([])
-    flow.onReceived(100)
+    flow.onReceived(100, performance.now())
     flow.onConsumed(100)
     flow.acknowledge()
     flow.acknowledge()
@@ -558,7 +558,7 @@ describe('FlowControl — 32-bit wraparound', () => {
       if (!blocked) {
         const gate = sender.decrement(size)
         sent += size
-        receiver.onReceived(size)
+        receiver.onReceived(size, performance.now())
         inFlight = Math.max(inFlight, sent - consumed)
         if (gate) {
           blocked = true
@@ -673,7 +673,7 @@ async function runPath({
         receiver.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         continue
       }
-      receiver.onReceived(frame.bytes)
+      receiver.onReceived(frame.bytes, performance.now())
       receiver.onConsumed(frame.bytes)
       delivered += frame.bytes
       if (now >= ms - 1_000) deliveredLastSecond += frame.bytes

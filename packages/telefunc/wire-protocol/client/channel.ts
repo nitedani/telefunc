@@ -297,7 +297,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
       for (const cb of this._listeners.list()) {
@@ -332,7 +332,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     const bytes = data.byteLength
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {

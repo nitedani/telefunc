@@ -209,11 +209,11 @@ class FlowControl {
     return starved
   }
 
-  /** Receiver-side: account one received frame off the wire. Emits a
+  /** Receiver-side: account one received frame off the wire, which arrived `at`. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
-  onReceived(bytes: number): void {
+  onReceived(bytes: number, at: number): void {
     this._arrived = true
-    if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, at)) this._emit.bdpPing(this._bdp.probe)
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
