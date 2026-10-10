@@ -101,6 +101,9 @@ class LoopbackSocket {
       this.onopen?.()
     }, LATENCY_MS)
   }
+  get bufferedAmount(): number {
+    return this.toServer.bytes
+  }
   send(frame: Uint8Array): void {
     loop.sends('page', frame)
     this.toServer.push(frame.slice())
