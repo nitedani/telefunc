@@ -26,7 +26,7 @@ const LATENCY_MS = 5
 /** What a socket read hands over at once; the receiver's microtasks run between two reads. */
 const READ_BYTES = 64 * 1024
 
-/** One direction of a wire: delivers in order, `LATENCY_MS` after the send. */
+/** One direction of a wire: a frame leaves once the one before it has, and arrives `LATENCY_MS` after it left. */
 class Pipe {
   private queue: { frame: Uint8Array<ArrayBuffer>; at: number }[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -38,9 +38,8 @@ class Pipe {
   private lastAt = 0
   constructor(private readonly deliver: (frame: Uint8Array<ArrayBuffer>) => void) {}
   push(frame: Uint8Array<ArrayBuffer>): void {
-    const at = Math.max(Date.now() + LATENCY_MS, this.lastAt + frame.byteLength / this.bytesPerMs)
-    this.lastAt = at
-    this.queue.push({ frame, at })
+    this.lastAt = Math.max(Date.now(), this.lastAt) + frame.byteLength / this.bytesPerMs
+    this.queue.push({ frame, at: this.lastAt + LATENCY_MS })
     this.bytes += frame.byteLength
     this.schedule()
   }
