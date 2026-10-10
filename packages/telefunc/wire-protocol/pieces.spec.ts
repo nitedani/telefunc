@@ -6,14 +6,48 @@ afterEach(() => void vi.restoreAllMocks())
 
 const data = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0: TAG.BINARY })
 
-/** What each message `transmitted` holds: a whole frame's length, or a piece's. */
+/** What each message `transmitted` holds: a whole frame's length, a piece's, or the bytes an announcement announces. */
 const lengths = (transmitted: Uint8Array[]) =>
   transmitted.map((message) => {
     const frame = decode(message)
+    if (frame.tag === TAG.ANNOUNCE) return `announce ${frame.bytes}`
     return frame.tag === TAG.PIECE ? `piece ${frame.piece.byteLength}` : message.byteLength
   })
 
-test("a probe pair's receiver spacing measures the rate the rest of its frame is cut by, a ping interval's eighth", () => {
+/** What the microtasks queued so far send. */
+const flush = () => Promise.resolve()
+
+test("with no rate measured, a task's frames go at once behind an announcement, the first large one in pieces that at most double from a probe pair", async () => {
+  const transmitted: Uint8Array[] = []
+  const sender = new PieceSender(
+    (message) => void transmitted.push(message),
+    () => 0,
+  )
+  sender.send(data(60_000), 5_000)
+  sender.send(data(10), 5_000)
+  sender.send(data(200_000), 5_000)
+  expect(transmitted).toHaveLength(0)
+  await flush()
+  // 8 KiB may follow any piece; the last two of a frame are cut so the last is the larger.
+  expect(lengths(transmitted)).toEqual([
+    'announce 260010',
+    'piece 0',
+    'piece 64',
+    'piece 2048',
+    'piece 8192',
+    'piece 16384',
+    'piece 11104',
+    'piece 22208',
+    10,
+    'piece 8192',
+    'piece 16384',
+    'piece 32768',
+    'piece 65536',
+    'piece 77120',
+  ])
+})
+
+test("a probe pair's receiver spacing measures the rate later frames are cut by, a ping interval's eighth", async () => {
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const transmitted: Uint8Array[] = []
@@ -22,17 +56,21 @@ test("a probe pair's receiver spacing measures the rate the rest of its frame is
     () => 0,
   )
   sender.send(data(100_000), 5_000)
-  sender.send(data(10), 5_000)
-  expect(lengths(transmitted)).toEqual(['piece 0', 'piece 2048', 'piece 2048'])
+  await flush()
   clock.now = 200
-  expect(sender.acknowledged(2_048, 0, 0)).toBe(true)
-  expect(transmitted).toHaveLength(3)
+  expect(sender.acknowledged(64, 0, 0)).toBe(true)
+  // Until the pair's second is acknowledged, frames still go behind an announcement.
+  sender.send(data(5_000), 5_000)
+  await flush()
+  expect(lengths(transmitted.slice(-2))).toEqual(['announce 5000', 5_000])
   // The second arrived 100 ms after the first: 2048 B per 100 ms carries 12 800 B in 5 s / 8.
-  expect(sender.acknowledged(4_096, 0, 100_000)).toBe(true)
-  expect(lengths(transmitted.slice(3))).toEqual([...Array(7).fill('piece 12800'), 'piece 6304', 10])
+  expect(sender.acknowledged(64 + 2_048, 0, 100_000)).toBe(true)
+  transmitted.length = 0
+  sender.send(data(30_000), 5_000)
+  expect(lengths(transmitted)).toEqual(['piece 0', 'piece 12800', 'piece 12800', 'piece 4400'])
 })
 
-test('a rate that lapsed still cuts a frame at once, until the next measure replaces it, though lower', () => {
+test('a rate that lapsed still cuts a frame at once, until the next measure replaces it, though lower', async () => {
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const transmitted: Uint8Array[] = []
@@ -41,10 +79,11 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
     () => 0,
   )
   sender.send(data(20_000), 5_000)
+  await flush()
   clock.now = 200
-  expect(sender.acknowledged(2_048, 0, 0)).toBe(true)
+  expect(sender.acknowledged(64, 0, 0)).toBe(true)
   // 2048 B per 100 ms: 12 800 B in 5 s / 8.
-  expect(sender.acknowledged(4_096, 0, 100_000)).toBe(true)
+  expect(sender.acknowledged(64 + 2_048, 0, 100_000)).toBe(true)
   clock.now = 2_200
   expect(sender.acknowledged(20_000, 0, 0)).toBe(true)
   clock.now = 70_000
@@ -59,7 +98,7 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
   expect(lengths(transmitted)).toEqual(['piece 0', 'piece 1875', 'piece 1875', 'piece 1250'])
 })
 
-test('an acknowledgement within one tick of a coarsened clock measures a probe at the tick, and nothing of a larger frame', () => {
+test('an acknowledgement within one tick of a coarsened clock measures a probe at the tick, and nothing of a larger frame', async () => {
   vi.spyOn(performance, 'now').mockReturnValue(1_000)
   const transmitted: Uint8Array[] = []
   const sender = new PieceSender(
@@ -67,19 +106,20 @@ test('an acknowledgement within one tick of a coarsened clock measures a probe a
     () => 0,
   )
   sender.send(data(20_000), 5_000)
-  expect(sender.acknowledged(2_048, 0, 0)).toBe(true)
-  expect(sender.acknowledged(4_096, 0, 0)).toBe(true)
-  // 2048 B in a tick: what it held goes, and so does a frame that rate carries in 5 s / 8.
-  expect(lengths(transmitted.slice(3))).toEqual(['piece 15904'])
+  await flush()
+  expect(sender.acknowledged(64, 0, 0)).toBe(true)
+  expect(sender.acknowledged(64 + 2_048, 0, 0)).toBe(true)
+  // 2048 B in a tick: a frame that rate carries in 5 s / 8 goes whole.
+  const before = transmitted.length
   sender.send(data(1_000_000), 5_000)
-  expect(lengths(transmitted.slice(4))).toEqual([1_000_000])
+  expect(lengths(transmitted.slice(before))).toEqual([1_000_000])
   expect(sender.acknowledged(1_020_000, 0, 0)).toBe(true)
   transmitted.length = 0
   sender.send(data(2_000_000), 5_000)
   expect(transmitted.length).toBeGreaterThan(1)
 })
 
-test('an acknowledgement counts the bytes handed to the socket, and refuses more, those a probe holds included, or nothing new', () => {
+test('an acknowledgement counts the bytes handed to the socket, and refuses more, those a probe or an announcement holds included, or nothing new', async () => {
   const sender = new PieceSender(
     () => {},
     () => 0,
@@ -91,19 +131,31 @@ test('an acknowledgement counts the bytes handed to the socket, and refuses more
   sender.send(new Uint8Array(100), 5_000)
   expect(sender.acknowledged(4_300, 0, 0)).toBe(false)
   expect(sender.acknowledged(4_200, 0, 0)).toBe(true)
-  // A probe: two pieces of 2048 B go, the rest of its frame waits for them.
+  // A frame to announce waits for the end of the task.
   sender.send(new Uint8Array(20_000), 5_000)
-  expect(sender.acknowledged(4_200 + 4_097, 0, 0)).toBe(false)
-  expect(sender.acknowledged(4_200 + 4_096, 0, 0)).toBe(true)
+  expect(sender.acknowledged(4_201, 0, 0)).toBe(false)
+  await flush()
+  expect(sender.acknowledged(24_201, 0, 0)).toBe(false)
   expect(sender.acknowledged(24_200, 0, 0)).toBe(true)
+  // On a link known slow, a probe of 256 B goes, the rest of its frame waits for it.
+  const slow = new PieceSender(
+    () => {},
+    () => 0,
+  )
+  slow.markSlow()
+  slow.send(new Uint8Array(20_000), 5_000)
+  expect(slow.acknowledged(257, 0, 0)).toBe(false)
+  expect(slow.acknowledged(256, 0, 0)).toBe(true)
+  expect(slow.acknowledged(20_000, 0, 0)).toBe(true)
 })
 
-test('an acknowledgement is read modulo 2^32', () => {
+test('an acknowledgement is read modulo 2^32', async () => {
   const sender = new PieceSender(
     () => {},
     () => 0,
   )
   sender.send(new Uint8Array(5_000), 5_000)
+  await flush()
   expect(sender.acknowledged(4_096, 0, 0)).toBe(true)
   expect(sender.acknowledged(5_000, 0, 0)).toBe(true)
   const frame = new Uint8Array(40_000_000)
@@ -156,7 +208,7 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB,
   vi.useRealTimers()
 })
 
-test('a receiver puts back a frame from pieces of any size, acknowledging its first two at once, and holds nothing for empty ones', () => {
+test('a receiver puts back a frame from pieces of any size, acknowledging the two after an empty one at once, and holds nothing for empty ones', () => {
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
@@ -178,7 +230,27 @@ test('a receiver puts back a frame from pieces of any size, acknowledging its fi
   expect(receiver.held).toBe(0)
   // A frame of 10 000 B is too small for its last pieces to be acknowledged.
   expect(sent).toHaveLength(2)
+  // Nor are a frame's first two, with no empty piece before them.
+  expect(receiver.add(10_000, frame.subarray(0, 1), Date.now())).toBeNull()
+  expect(receiver.add(10_000, frame.subarray(1), Date.now())).toEqual(frame)
+  expect(sent).toHaveLength(2)
   vi.useRealTimers()
+})
+
+test('a receiver waits for what was announced twice the time its next message takes at the rate the newest came at, which may carry twice as much, or 8 KiB', () => {
+  const receiver = new PieceReceiver(() => {}, { peerHoldsBack: false })
+  receiver.announce(100_000, 0)
+  // Before a message of it arrived, it knows no rate.
+  expect(receiver.expectedBy).toBe(0)
+  receiver.add(100_000, new Uint8Array(0), 0)
+  receiver.add(100_000, data(64), 10)
+  // 64 B in 10 ms; the next may carry 8 KiB: 2 × 8192 / 6.4.
+  expect(receiver.expectedBy).toBe(10 + 2_560)
+  receiver.add(100_000, new Uint8Array(16_384), 1_000)
+  // 16 KiB in 990 ms; the next may carry twice as much: 2 × 32 KiB at that rate.
+  expect(receiver.expectedBy).toBe(1_000 + 3_960)
+  expect(receiver.add(100_000, new Uint8Array(100_000 - 64 - 16_384), 2_000)).not.toBeNull()
+  expect(receiver.expectedBy).toBe(0)
 })
 
 test.each([

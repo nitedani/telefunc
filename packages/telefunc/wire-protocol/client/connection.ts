@@ -105,6 +105,8 @@ class Heartbeat {
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
   private lastReceivedAt = 0
+  /** Until when the wire may deliver nothing: what it still carries takes that long. */
+  private expectedBy = 0
 
   constructor(
     readonly intervalMs: number,
@@ -130,9 +132,14 @@ class Heartbeat {
     this.lastReceivedAt = at
   }
 
-  /** How long the wire has delivered nothing, since the heartbeat started or got a PONG if later. */
+  expectUntil(at: number): void {
+    this.expectedBy = at
+  }
+
+  /** How long the wire has delivered nothing, since the heartbeat started or got a PONG if later, less the time it may
+   *  take past the deadline to deliver what it still carries. */
   quietFor(): number {
-    return performance.now() - this.lastReceivedAt
+    return performance.now() - Math.max(this.lastReceivedAt, this.expectedBy - this.pongTimeoutMs)
   }
 
   private armPongDeadline(ms: number): void {
@@ -922,7 +929,7 @@ class ClientConnection implements MuxConnection {
         this.startTtlIfIdle()
         return
     }
-    // PING/PONG/PIECE/PIECES_ACK/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
+    // PING/PONG/PIECE/PIECES_ACK/ANNOUNCE/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
     // transports peel them off in their own receive paths. Everything that lands
     // here is per-channel and carries `index`.
     const channelFrame = frame as ChannelFrame
@@ -2005,10 +2012,13 @@ class WsTransport implements UpgradeTarget {
       const now = performance.now()
       this.heartbeat?.noteReceived(now)
       const message = receiveMessage(ws, pieces, data, now)
+      // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
+      this.heartbeat?.expectUntil(Math.max(pieces.expectedBy, now + sender.acknowledgingMs))
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
         if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return
+        this.heartbeat?.expectUntil(Math.max(pieces.expectedBy, now + sender.acknowledgingMs))
         if (sender.heldBytes === 0) this.settleDrained()
         this.owner._onTransportRoom(this)
         return
@@ -2124,6 +2134,10 @@ function receiveMessage(
   try {
     let raw = new Uint8Array(data as ArrayBuffer)
     let frame = decode(raw)
+    if (frame.tag === TAG.ANNOUNCE) {
+      pieces.announce(frame.bytes, at)
+      return null
+    }
     if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece, at)
       if (whole === null) return null

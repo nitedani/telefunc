@@ -416,6 +416,7 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
+    if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, connection, rawFrame)
     const now = performance.now()
     if (!pieced) state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
     state.recvBacklogBytes += byteLength
@@ -459,6 +460,25 @@ class ChannelMux {
     }
     if (frame === null) return Promise.resolve(null)
     return this.dispatchFrame(entry, connection, frame, true)
+  }
+
+  private receiveAnnounce(
+    entry: ConnectionEntry,
+    connection: Wire,
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): Promise<ReconcileOutcome | null> {
+    const now = performance.now()
+    entry.state.lastReceivedAt = now
+    try {
+      const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+      assert(announce.tag === TAG.ANNOUNCE)
+      assertProtocol(entry.state.pieces, 'ANNOUNCE on a wire that takes no pieces')
+      entry.state.pieces.receiver.announce(announce.bytes, now)
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(connection)
+    }
+    return Promise.resolve(null)
   }
 
   /** Bytes reached `connection`: a frame that takes longer than the ping deadline to arrive whole shows the
@@ -1110,10 +1130,13 @@ class ChannelMux {
       setTimeout(() => {
         state.pingTimer = null
         // A PING arrives behind what the page queued before it, as an upload on a slow link: the wire is dead once it
-        // has delivered nothing for the deadline.
-        const quiet = performance.now() - state.lastReceivedAt
-        if (quiet < this.options.pingDeadline)
-          return this.armPingDeadline(connection, entry, this.options.pingDeadline - quiet)
+        // has delivered nothing for the deadline, and nothing of what the page announced for the time that takes.
+        const deadAt = Math.max(
+          state.lastReceivedAt + this.options.pingDeadline,
+          state.pieces?.receiver.expectedBy ?? 0,
+        )
+        const now = performance.now()
+        if (now < deadAt) return this.armPingDeadline(connection, entry, deadAt - now)
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)

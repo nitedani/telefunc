@@ -106,12 +106,16 @@ const TAG = {
    *  addressed to the staged probe. Its own tag so the size cap lands on the raw bytes. */
   BARRIER: 0x09 as const,
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
-   *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
+   *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece; an empty one, before a frame's first, asks its
+   *  receiver to acknowledge the next two at once. */
   PIECE: 0x0a as const,
   /** Back, as `PieceReceiver` says, for the frames and pieces that arrived. Payload: u32, the bytes of them it took in
    *  all (mod 2^32), u32, the ms it held the newest, then u32, the µs between the arrival of the newest data and of the
    *  newest the ack before covered, 0 for the first, or where it covers none. */
   PIECES_ACK: 0x0b as const,
+  /** Either way on a WebSocket: the bytes of the frames that follow it at once, whole or in pieces, which its receiver
+   *  waits for at the rate they arrive (see `pieces.ts`). Payload: u32, their bytes. */
+  ANNOUNCE: 0x0c as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -356,6 +360,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
   | { tag: typeof TAG.PIECES_ACK; bytes: number; heldMs: number; spanUs: number }
+  | { tag: typeof TAG.ANNOUNCE; bytes: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -532,6 +537,12 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     writeU32(frame, HEADER + 4, heldMs)
     writeU32(frame, HEADER + 8, spanUs)
+    return frame
+  },
+  announce(bytes: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.ANNOUNCE, 0, 0)
+    writeU32(frame, HEADER, bytes)
     return frame
   },
 
@@ -726,6 +737,9 @@ function decode(frame: Uint8Array): DecodedFrame {
         heldMs: readU32(payload, 4),
         spanUs: readU32(payload, 8),
       }
+    case TAG.ANNOUNCE:
+      assertProtocol(payload.length >= 4, 'ANNOUNCE payload too short')
+      return { tag: TAG.ANNOUNCE, bytes: readU32(payload, 0) }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
@@ -783,6 +797,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PING,
   TAG.PIECE,
   TAG.PIECES_ACK,
+  TAG.ANNOUNCE,
   TAG.RECONCILE,
   TAG.BARRIER,
   TAG.PREPARE,

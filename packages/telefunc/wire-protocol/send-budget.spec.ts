@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import {
   CREDIT_WINDOW_MAX_BYTES,
+  WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
@@ -18,7 +19,7 @@ const flowControl = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0:
 const PROBE = 5_000
 
 /** A budget on a clock the test sets. */
-function open() {
+async function open() {
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const sender = new PieceSender(
@@ -26,7 +27,9 @@ function open() {
     () => 0,
   )
   sender.send(data(PROBE), 5_000)
-  sender.acknowledged(2 * WIRE_PROBE_PAIR_BYTES, 0, 0)
+  // It goes behind an announcement, at the end of the task.
+  await Promise.resolve()
+  sender.acknowledged(WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, 0, 0)
   sender.acknowledged(PROBE, 0, 0)
   const budget = new SendBudget(sender)
   let sent = PROBE
@@ -42,8 +45,8 @@ function open() {
   return { budget, clock, exchange }
 }
 
-test('data goes out until the allowance is sent, and more as the server acknowledges it', () => {
-  const { budget } = open()
+test('data goes out until the allowance is sent, and more as the server acknowledges it', async () => {
+  const { budget } = await open()
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBeGreaterThan(0)
@@ -53,16 +56,16 @@ test('data goes out until the allowance is sent, and more as the server acknowle
   expect(budget.room).toBeGreaterThan(0)
 })
 
-test('the frames that go at once count against the room, and are not dated', () => {
-  const { budget } = open()
+test('the frames that go at once count against the room, and are not dated', async () => {
+  const { budget } = await open()
   budget.send(flowControl(1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
   expect(budget.acknowledged(PROBE + 1_000, 0, 0)).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
-test('the allowance grows by what each acknowledgement covers while no frame waits, to the largest credit window', () => {
-  const { exchange } = open()
+test('the allowance grows by what each acknowledgement covers while no frame waits, to the largest credit window', async () => {
+  const { exchange } = await open()
   expect(exchange(32_000, 0)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 32_000)
   expect(exchange(32_000, 10)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 2 * 32_000)
   let allowance = 0
@@ -70,8 +73,8 @@ test('the allowance grows by what each acknowledgement covers while no frame wai
   expect(allowance).toBe(CREDIT_WINDOW_MAX_BYTES)
 })
 
-test('the allowance falls while frames wait more than the target, to the least', () => {
-  const { exchange } = open()
+test('the allowance falls while frames wait more than the target, to the least', async () => {
+  const { exchange } = await open()
   for (let i = 0; i < 20; i++) exchange(32_000, 10)
   // Each frame reaches the server 5 ms later than the one before it, and 10 ms after it.
   let allowance = exchange(32_000, 10)
@@ -85,8 +88,8 @@ test('the allowance falls while frames wait more than the target, to the least',
   expect(allowance).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
-test('a wait that stays over the target with the least allowance is the path having slowed, not a queue', () => {
-  const { exchange } = open()
+test('a wait that stays over the target with the least allowance is the path having slowed, not a queue', async () => {
+  const { exchange } = await open()
   exchange(32_000, 0)
   // The path now takes 200 ms more, for all that follows.
   exchange(32_000, 10 + 200)

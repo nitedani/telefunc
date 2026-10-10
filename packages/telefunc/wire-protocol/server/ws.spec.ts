@@ -45,6 +45,7 @@ async function attachToStalledPage(websocket: (written: () => number) => object,
       written += message.byteLength
       if (!acknowledging) return
       const frame = decode(message)
+      if (frame.tag === TAG.ANNOUNCE) return
       const bytes = frame.tag === TAG.PIECE ? frame.piece.byteLength : message.byteLength
       if (bytes === 0) return
       took += bytes

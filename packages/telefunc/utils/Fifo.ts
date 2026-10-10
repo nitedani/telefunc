@@ -13,6 +13,10 @@ class Fifo<T> {
     this.items.push(item)
   }
 
+  peek(): T | undefined {
+    return this.items[this.head]
+  }
+
   shift(): T | undefined {
     if (this.head === this.items.length) return undefined
     const item = this.items[this.head] as T
