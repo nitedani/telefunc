@@ -5,6 +5,11 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { TAG } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
 
+/** What holding an entry retains beyond its payload, so many small messages are bounded by memory too: a send's
+ *  callbacks and the promise its caller got (about 480 bytes measured), and a publish's slots (about 52). */
+const HELD_SEND_OVERHEAD_BYTES = 512
+const HELD_PUBLISH_OVERHEAD_BYTES = 64
+
 /** Callback pair for buffered entries — resolve on flush, reject on eviction. */
 type EntryCallback = {
   resolve: (...args: any[]) => void
@@ -16,8 +21,9 @@ type EntryCallback = {
  *
  * Buffers text, publish, binary, and ack-request messages sent before the client connects.
  * After every push, oldest entries are evicted (FIFO) until the byte
- * total is within the cap. Delivery callbacks on evicted entries are rejected
- * immediately so channel memory stays hard-capped.
+ * total, each entry counted with what holding it retains, is within the cap.
+ * Delivery callbacks on evicted entries are rejected immediately so channel
+ * memory stays hard-capped.
  *
  * Binary messages (tags 1 and 4) are stored in a separate lane with its own
  * byte budget. An oversized binary only clears the binary lane — text messages
@@ -231,6 +237,7 @@ class BufferLane {
     order: number,
   ): void {
     const overflowErr = new ChannelOverflowError()
+    bytes += callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES
     if (bytes > this.#maxBytes) {
       const dropsPublish = isPublishTag(tag) || this.#tags.slice(this.#head).some(isPublishTag)
       this.clear(overflowErr)
