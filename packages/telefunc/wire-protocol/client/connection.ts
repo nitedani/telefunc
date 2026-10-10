@@ -1818,6 +1818,7 @@ class WsTransport implements UpgradeTarget {
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private pieceSender: PieceSender | null = null
   private budget: SendBudget | null = null
+  private drainCallbacks: Array<() => void> = []
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -1974,8 +1975,13 @@ class WsTransport implements UpgradeTarget {
   }
 
   drained(): Promise<void> {
-    // A socket sends what it buffered before its close.
-    return Promise.resolve()
+    // A socket sends what it buffered before its close, but not what its piece sender holds for a probe.
+    if (!this.ws || !this.pieceSender?.heldBytes) return Promise.resolve()
+    return new Promise((resolve) => this.drainCallbacks.push(resolve))
+  }
+
+  private settleDrained(): void {
+    for (const cb of this.drainCallbacks.splice(0)) cb()
   }
 
   /** Every frame `ws` carries goes through its sender, which counts the bytes its receiver acknowledges. */
@@ -2002,7 +2008,9 @@ class WsTransport implements UpgradeTarget {
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        if (budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) this.owner._onTransportRoom(this)
+        if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return
+        if (sender.heldBytes === 0) this.settleDrained()
+        this.owner._onTransportRoom(this)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -2015,6 +2023,7 @@ class WsTransport implements UpgradeTarget {
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
       this.connecting = false
+      this.settleDrained()
       this.owner._onTransportClosed(this, { rejectedByServer: !this.everOpened })
     }
     ws.onerror = () => {}
@@ -2042,8 +2051,9 @@ class WsTransport implements UpgradeTarget {
     return this.budget.room
   }
 
+  /** What its socket holds unsent, and what its piece sender holds for a probe. */
   bufferedAmount(): number {
-    return this.ws?.bufferedAmount ?? 0
+    return (this.ws?.bufferedAmount ?? 0) + (this.pieceSender?.heldBytes ?? 0)
   }
 
   abandonActiveTransport(): void {
@@ -2053,6 +2063,7 @@ class WsTransport implements UpgradeTarget {
     this.closeAbandonedTransport()
     this.abandonedWs = ws
     ws.onopen = ws.onerror = ws.onclose = null
+    this.settleDrained()
   }
 
   closeAbandonedTransport(): void {
@@ -2098,11 +2109,12 @@ class WsTransport implements UpgradeTarget {
       } catch {}
     }
     this.closeAbandonedTransport()
+    this.settleDrained()
   }
 }
 
 /** The frame a WebSocket message that arrived at `at` completes, or null: a piece before its frame's last, or bytes that
- *  close `ws`. Its receiver acknowledges a large one (`PieceReceiver.arrived`). */
+ *  close `ws`. Its receiver acknowledges it as `PieceReceiver` says. */
 function receiveMessage(
   ws: WebSocket,
   pieces: PieceReceiver,
@@ -2113,12 +2125,11 @@ function receiveMessage(
     let raw = new Uint8Array(data as ArrayBuffer)
     let frame = decode(raw)
     if (frame.tag === TAG.PIECE) {
-      const whole = pieces.add(frame.total, frame.piece)
+      const whole = pieces.add(frame.total, frame.piece, at)
       if (whole === null) return null
       raw = whole
       frame = decode(raw)
-    }
-    pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
+    } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
     return { frame, byteLength: raw.byteLength }
   } catch {
     ws.close()

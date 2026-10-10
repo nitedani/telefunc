@@ -1,5 +1,10 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { CREDIT_WINDOW_MAX_BYTES, WIRE_QUEUE_DELAY_MS, WIRE_SEND_AHEAD_MIN_BYTES } from './constants.js'
+import {
+  CREDIT_WINDOW_MAX_BYTES,
+  WIRE_PROBE_PAIR_BYTES,
+  WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_AHEAD_MIN_BYTES,
+} from './constants.js'
 import { PieceSender } from './pieces.js'
 import { SendBudget } from './send-budget.js'
 import { TAG } from './shared-ws.js'
@@ -9,6 +14,9 @@ afterEach(() => void vi.restoreAllMocks())
 const data = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0: TAG.BINARY })
 const flowControl = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0: TAG.WINDOW })
 
+/** The bytes of the probe by which its sender measured its rate, so it hands the socket what it is sent at once. */
+const PROBE = 5_000
+
 /** A budget on a clock the test sets. */
 function open() {
   const clock = { now: 0 }
@@ -17,8 +25,11 @@ function open() {
     () => {},
     () => 0,
   )
+  sender.send(data(PROBE), 5_000)
+  sender.acknowledged(2 * WIRE_PROBE_PAIR_BYTES, 0, 0)
+  sender.acknowledged(PROBE, 0, 0)
   const budget = new SendBudget(sender)
-  let sent = 0
+  let sent = PROBE
   /** Sends a data frame and has the server acknowledge it `spanMs` after the one before it. The allowance, with nothing
    *  unacknowledged. */
   const exchange = (bytes: number, spanMs: number) => {
@@ -38,7 +49,7 @@ test('data goes out until the allowance is sent, and more as the server acknowle
   expect(budget.room).toBeGreaterThan(0)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBeLessThan(0)
-  expect(budget.acknowledged(40_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(PROBE + 40_000, 0, 0)).toBe(true)
   expect(budget.room).toBeGreaterThan(0)
 })
 
@@ -46,7 +57,7 @@ test('the frames that go at once count against the room, and are not dated', () 
   const { budget } = open()
   budget.send(flowControl(1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
-  expect(budget.acknowledged(1_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(PROBE + 1_000, 0, 0)).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 

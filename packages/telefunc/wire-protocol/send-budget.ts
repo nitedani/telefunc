@@ -49,7 +49,7 @@ class SendBudget {
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`). */
   acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
     const before = this.sender.acknowledgedBytes
-    if (!this.sender.acknowledged(bytes, heldMs)) return false
+    if (!this.sender.acknowledged(bytes, heldMs, spanUs)) return false
     const acknowledged = this.sender.acknowledgedBytes
     const newly = acknowledged - before
     this.arrivedAt += spanUs / 1000

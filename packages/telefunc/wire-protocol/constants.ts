@@ -198,14 +198,18 @@ export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 
 // ===== WebSocket frames in pieces (see `pieces.ts`) =====
 
-/** A link that carries a piece per ping deadline keeps its wire, until it measured a faster rate (see below). */
-export const WIRE_PIECE_BYTES = 16 * 1024
-/** Until the wire has a measured rate, or the link is known slow, a frame up to this size goes whole, a larger one in
- *  pieces this size. */
-export const WIRE_UNMEASURED_WHOLE_BYTES = 256 * 1024
+/** A receiver acknowledges a frame over this size, or, where its peer holds data back, this many bytes of any frames. */
+export const WIRE_PIECES_ACK_BYTES = 16 * 1024
+/** With no rate measured, each of the two pieces a frame starts with, sent back to back: the time between their
+ *  arrivals measures the rate the rest is cut by. A frame up to both goes whole. */
+export const WIRE_PROBE_PAIR_BYTES = 2 * 1024
+/** The same on a link known slow, as one piece, whose crossing time alone measures the rate. */
+export const WIRE_PROBE_BYTES = 256
+/** The least time a probe's measure takes: the coarsest clock a browser gives a page. */
+export const WIRE_PROBE_CLOCK_MS = 1
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8
-/** How long a measured rate stands after it last rose. */
+/** How long a measured rate stands after it last rose: past it, the next measure replaces it, lower or not. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50

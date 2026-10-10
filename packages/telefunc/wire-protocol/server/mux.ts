@@ -394,11 +394,20 @@ class ChannelMux {
 
   // ── Inbound dispatch ────────────────────────────────────────────────
 
-  /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
-   *  awaitable on the connection. */
   private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
+    return this.dispatchFrame(entry, connection, rawFrame, false)
+  }
+
+  /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
+   *  awaitable on the connection. A frame its pieces completed (`pieced`) was counted as they arrived. */
+  private dispatchFrame(
+    entry: ConnectionEntry,
+    connection: Wire,
+    rawFrame: Uint8Array<ArrayBuffer>,
+    pieced: boolean,
+  ): Promise<ReconcileOutcome | null> {
     const { state } = entry
     const byteLength = rawFrame.byteLength
     if (this.isOverBudget(entry, connection, rawFrame)) {
@@ -408,7 +417,7 @@ class ChannelMux {
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
     const now = performance.now()
-    state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
+    if (!pieced) state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
     state.lastReceivedAt = now
@@ -425,7 +434,8 @@ class ChannelMux {
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
     // Each piece answered: the page's PINGs wait behind the rest of its frame.
-    entry.state.lastReceivedAt = performance.now()
+    const now = performance.now()
+    entry.state.lastReceivedAt = now
     this.pong(entry, connection, [])
     const { state } = entry
     let frame: Uint8Array<ArrayBuffer> | null
@@ -438,7 +448,7 @@ class ChannelMux {
       assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
       const { receiver } = state.pieces
       const heldBefore = receiver.held
-      frame = receiver.add(piece.total, piece.piece)
+      frame = receiver.add(piece.total, piece.piece, now)
       // What it holds of a frame counts in the recv backlog as the frame does once whole.
       state.recvBacklogBytes += receiver.held - heldBefore
       state.recvBacklogFrames += Number(receiver.held > 0) - Number(heldBefore > 0)
@@ -448,7 +458,7 @@ class ChannelMux {
       return Promise.resolve(null)
     }
     if (frame === null) return Promise.resolve(null)
-    return this.dispatchInbound(connection, frame)
+    return this.dispatchFrame(entry, connection, frame, true)
   }
 
   /** Bytes reached `connection`: a frame that takes longer than the ping deadline to arrive whole shows the
@@ -529,7 +539,10 @@ class ChannelMux {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs), 'PIECES_ACK for nothing sent')
+      assertProtocol(
+        entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs, frame.spanUs),
+        'PIECES_ACK for nothing sent',
+      )
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -1049,7 +1062,7 @@ class ChannelMux {
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
    *  tell. */
   private sendHeadroom(entry: ConnectionEntry, connection: Wire): number {
-    const backlog = entry.transport.bufferedAmount(connection)
+    const backlog = this.bufferedAmount(connection)
     if (backlog === undefined) return Infinity
     const sessionId = entry.transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
@@ -1060,11 +1073,12 @@ class ChannelMux {
     return allowed - backlog
   }
 
-  /** A wire that's gone holds nothing. */
+  /** What its socket holds unsent, and what its piece sender holds for a probe. A wire that's gone holds nothing. */
   private bufferedAmount(connection: Wire): number | undefined {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
-    return entry.transport.bufferedAmount(connection)
+    const socket = entry.transport.bufferedAmount(connection)
+    return socket === undefined ? undefined : socket + (entry.state.pieces?.sender.heldBytes ?? 0)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
