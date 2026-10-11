@@ -137,16 +137,6 @@ test('an acknowledgement counts the bytes handed to the socket, and refuses more
   await flush()
   expect(sender.acknowledged(24_201, 0, 0)).toBe(false)
   expect(sender.acknowledged(24_200, 0, 0)).toBe(true)
-  // On a link known slow, a probe of 256 B goes, the rest of its frame waits for it.
-  const slow = new PieceSender(
-    () => {},
-    () => 0,
-  )
-  slow.markSlow()
-  slow.send(new Uint8Array(20_000), 5_000)
-  expect(slow.acknowledged(257, 0, 0)).toBe(false)
-  expect(slow.acknowledged(256, 0, 0)).toBe(true)
-  expect(slow.acknowledged(20_000, 0, 0)).toBe(true)
 })
 
 test('an acknowledgement is read modulo 2^32', async () => {

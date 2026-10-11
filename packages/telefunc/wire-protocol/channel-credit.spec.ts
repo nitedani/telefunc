@@ -15,7 +15,6 @@ import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   RECONCILE_TIMEOUT_MS,
-  WIRE_PROBE_BYTES,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { Fifo } from '../utils/Fifo.js'
@@ -217,15 +216,6 @@ const piecesOf = (socket: LoopbackSocket) =>
 
 /** The bytes a PIECE adds to its piece. */
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
-
-/** The bytes of the first piece of a frame a side sent since `mark`: its probe's, where it measured no rate. A smaller
- *  piece is a small frame's, announced before the wire knew its link slow. */
-const firstPiece = (side: 'page' | 'server', mark: number) => {
-  const sent = loop.sent[side]
-    .slice(mark)
-    .find(([tag, , bytes]) => tag === TAG.PIECE && bytes - PIECE_HEADER_BYTES >= WIRE_PROBE_BYTES)
-  return sent === undefined ? undefined : sent[2] - PIECE_HEADER_BYTES
-}
 
 /** What the server holds for the page on `socket`: what the wire carries, and what waits for a probe. */
 const serverHolds = (socket: LoopbackSocket) =>
@@ -1396,9 +1386,11 @@ test('on a fresh fast wire, frames of 32 KB and 128 KB go at once, in pieces tha
   expect(loop.sockets).toHaveLength(1)
 })
 
-test.each(['page', 'server'] as const)(
-  "after a wire is lost with a probe of the %s's unacknowledged, the next wire probes with one small piece from its first, either way",
-  async (sender) => {
+// What a lost wire held goes again on the next, which starts as any fresh wire does: behind its announcement, at the rate
+// its link carries.
+test.each((['page', 'server'] as const).flatMap((sender) => (['fast', 'slow'] as const).map((next) => [sender, next])))(
+  "after a wire is lost with a frame of the %s's unacknowledged on it, the next wire, on a %s link, carries it and 100 KB each way in the time the link takes",
+  async (sender, next) => {
     const { server, page } = loop.open<Uint8Array, Uint8Array>()
     const atServer: number[] = []
     const atPage: number[] = []
@@ -1407,41 +1399,45 @@ test.each(['page', 'server'] as const)(
     await run(100)
     const lost = loop.socket
     ;(sender === 'page' ? lost.toServer : lost.toPage).bytesPerMs = 1
-    const before = loop.sent[sender].length
     void (sender === 'page' ? page : server).sendBinary(new Uint8Array(128_000))
     await run(100)
-    // Behind its announcement, its empty piece, its probe pair, and the rest of it at once.
-    expect(loop.sent[sender].slice(before).map(([tag]) => tag)).toEqual([TAG.ANNOUNCE, ...Array(8).fill(TAG.PIECE)])
+    if (next === 'slow') loop.linkBytesPerMs = 1
     lost.cut()
     await runUntil(() => loop.sockets.length === 2, 5_000)
-    const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+    const sentAt = Date.now() + 1_000
     await run(1_000)
     void page.sendBinary(new Uint8Array(100_000))
     void server.sendBinary(new Uint8Array(100_000))
-    await runUntil(() => atServer.length > 0 && atPage.length > 0, 5_000)
-    for (const side of ['page', 'server'] as const) {
-      expect(firstPiece(side, marks[side])).toBe(WIRE_PROBE_BYTES)
-    }
+    // At 1 B/ms, the lost frame and the 100 KB behind it.
+    const takes = 1.05 * (next === 'slow' ? 228_000 : 0) + 100
+    await runUntil(() => atServer.includes(100_000) && atPage.includes(100_000), takes)
+    expect(Date.now() - sentAt).toBeLessThanOrEqual(takes)
+    expect(sender === 'page' ? atServer : atPage).toEqual([128_000, 100_000])
+    expect(sender === 'page' ? atPage : atServer).toEqual([100_000])
     expect(loop.sockets).toHaveLength(2)
   },
 )
 
-test('after a page gives up a wire whose pongs stopped, with a probe of its own unacknowledged, the next wire probes with one small piece', async () => {
+test('after a page gives up a wire whose pongs stopped, with a frame of its own unacknowledged, the next wire carries it and the next at once', async () => {
   config.channel.pingInterval = 1_000
-  const { page } = loop.open<Uint8Array, Uint8Array>()
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const atServer: number[] = []
+  server.listenBinary((data) => void atServer.push(data.byteLength))
   await run(100)
   // Nothing the server sends reaches the page: its pongs stop, and so does the PIECES_ACK for its frame.
   loop.socket.toPage.hold()
   void page.sendBinary(new Uint8Array(128_000))
   await runUntil(() => loop.sockets.length === 2, 10_000)
-  const mark = loop.sent.page.length
   await run(1_000)
+  const sentAt = Date.now()
   void page.sendBinary(new Uint8Array(100_000))
-  await run(1_000)
-  expect(firstPiece('page', mark)).toBe(WIRE_PROBE_BYTES)
+  await runUntil(() => atServer.length === 2, 1_000)
+  expect(atServer).toEqual([128_000, 100_000])
+  expect(Date.now() - sentAt).toBeLessThanOrEqual(100)
+  expect(loop.sockets).toHaveLength(2)
 })
 
-test("after a page drops a wire the server still holds open, with a probe of the server's unacknowledged on it, the next wire probes with one small piece", async () => {
+test("after a page drops a wire the server still holds open, with a frame of the server's unacknowledged on it, the next wire carries it and the page's next at once", async () => {
   config.channel.pingInterval = 1_000
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   const atServer: number[] = []
@@ -1453,13 +1449,14 @@ test("after a page drops a wire the server still holds open, with a probe of the
   void server.sendBinary(new Uint8Array(128_000))
   loop.socket.toPage.hold()
   await runUntil(() => loop.sockets.length === 2, 10_000)
-  const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
   await run(1_000)
+  const sentAt = Date.now()
   void page.sendBinary(new Uint8Array(100_000))
-  await runUntil(() => atServer.length > 0, 5_000)
-  for (const side of ['page', 'server'] as const) {
-    expect(firstPiece(side, marks[side])).toBe(WIRE_PROBE_BYTES)
-  }
+  await runUntil(() => atServer.length > 0 && atPage.length > 0, 1_000)
+  expect(atServer).toEqual([100_000])
+  expect(atPage).toEqual([128_000])
+  expect(Date.now() - sentAt).toBeLessThanOrEqual(100)
+  expect(loop.sockets).toHaveLength(2)
 })
 
 test.each([

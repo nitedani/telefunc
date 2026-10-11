@@ -7,7 +7,6 @@ import {
   WIRE_PIECE_RATE_MARGIN,
   WIRE_PIECE_RATE_WINDOW_MS,
   WIRE_PIECES_ACK_GAP_MS,
-  WIRE_PROBE_BYTES,
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
@@ -36,25 +35,13 @@ function announcedNext(last: number, floor: number): number {
  *  `announcedNext` allows. So does a smaller data frame, unless it crosses within its ping deadline: one of
  *  `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at the floor, the rate the link carries at least by what its
  *  receiver took by an answer, a heartbeat or an acknowledged announcement. A smaller control frame, such as the
- *  handshake's, goes whole. On a link known slow, a larger frame sends one small piece as a probe, and the rest of it and
- *  every frame after it but a PIECES_ACK wait for its acknowledgement. With a rate measured, a data frame past `dataRoom`
+ *  handshake's, goes whole. With a rate measured, a data frame past `dataRoom`
  *  goes in pieces as far as that goes, and its rest waits for `sendHeld`: the frames after it wait too, but those that
  *  aren't data and go whole, as a window update does. */
 class PieceSender {
-  /** The link is known to be too slow for big whole frames. */
-  private slow = false
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
-   *  arrived, when it was sent, the bytes sent through it, whether it was a probe's, and whether it was cut by no rate
-   *  or a lapsed one. */
-  private readonly unacknowledged = new Fifo<{
-    crossing: number
-    at: number
-    end: number
-    probe: boolean
-    blind: boolean
-  }>()
-  /** How many of them were cut by no rate or a lapsed one. */
-  private blindUnacknowledged = 0
+   *  arrived, when it was sent, the bytes sent through it, and whether it was a probe's. */
+  private readonly unacknowledged = new Fifo<{ crossing: number; at: number; end: number; probe: boolean }>()
   /** The bytes of the frames sent in all, and those the receiver has acknowledged; the first's, and when it was sent. */
   sentBytes = 0
   acknowledgedBytes = 0
@@ -68,11 +55,11 @@ class PieceSender {
   onData = (_bytes: number): void => {}
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
   private probe: { end: number; second: number | null } | null = null
-  /** The rest of a frame: on a link known slow, waiting for the probe's acknowledgement; else of data, for room. */
+  /** The rest of a data frame, waiting for room. */
   private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
   /** The frames sent after the rest, but those that pass it; else the frames of this task, announced at its end. */
   private readonly held = new Fifo<Uint8Array<ArrayBuffer>>()
-  /** The bytes waiting for a probe's acknowledgement or for room, or to be announced. */
+  /** The bytes waiting for room, or to be announced. */
   heldBytes = 0
   private announcing = false
   /** The bytes of the newest message it announced; each it announced and its receiver hasn't acknowledged: where it ends,
@@ -131,9 +118,8 @@ class PieceSender {
   private announces(frame: Uint8Array<ArrayBuffer>): boolean {
     const bytes = frame.byteLength
     return (
-      !this.slow &&
-      (this.probe !== null ||
-        (this.fastest === 0 && bytes > this.unannouncedUpTo && (bytes > this.wholeUpTo || isSequencedTag(frame[0]!))))
+      this.probe !== null ||
+      (this.fastest === 0 && bytes > this.unannouncedUpTo && (bytes > this.wholeUpTo || isSequencedTag(frame[0]!)))
     )
   }
 
@@ -160,17 +146,15 @@ class PieceSender {
     const bytes = frame.byteLength
     const now = performance.now()
     const room = Math.max(0, Math.floor(this.dataRoom()))
-    const end =
-      this.fastest > 0 && isSequencedTag(frame[0]!)
-        ? room < Math.min(WIRE_ROOM_PIECE_MIN_BYTES, bytes - offset)
-          ? offset
-          : Math.min(bytes, offset + room)
-        : bytes
-    if (end === offset && this.fastest > 0) return this.hold(frame, offset)
+    const end = !isSequencedTag(frame[0]!)
+      ? bytes
+      : room < Math.min(WIRE_ROOM_PIECE_MIN_BYTES, bytes - offset)
+        ? offset
+        : Math.min(bytes, offset + room)
+    if (end === offset) return this.hold(frame, offset)
     // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
     // two pieces at once. One cut only for room is no measure.
     if (offset === 0 && bytes > this.wholeUpTo) this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
-    if (this.fastest === 0) return this.sendSlowProbe(frame, now)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
     this.transmitted(frame, end - offset)
     if (acknowledges(bytes)) this.track(end - offset, now, false)
@@ -185,19 +169,10 @@ class PieceSender {
     if (isSequencedTag(frame[0]!)) this.onData(bytes)
   }
 
-  /** Holds `frame` from `offset`, for room or for the probe's acknowledgement. */
+  /** Holds `frame` from `offset`, for room. */
   private hold(frame: Uint8Array<ArrayBuffer>, offset: number): void {
     this.rest = { frame, offset }
     this.heldBytes += frame.byteLength - offset
-  }
-
-  /** On a link known slow, sends the first piece of `frame` as a probe, and holds the rest. */
-  private sendSlowProbe(frame: Uint8Array<ArrayBuffer>, now: number): void {
-    this.transmitted(frame, WIRE_PROBE_BYTES)
-    this.track(WIRE_PROBE_BYTES, now, true)
-    this.transmit(encode.piece(frame.byteLength, frame.subarray(0, WIRE_PROBE_BYTES)))
-    this.probe = { end: this.transmittedBytes, second: null }
-    this.hold(frame, WIRE_PROBE_BYTES)
   }
 
   /** Announces the frames of this task, and sends them. */
@@ -275,36 +250,23 @@ class PieceSender {
   private track(crossingBytes: number, at: number, probe: boolean): void {
     // What its socket holds unsent crosses before it; a browser may count the message it is sending in full, so less the
     // largest frame.
-    const blind = this.lapsed(at)
-    if (blind) this.blindUnacknowledged++
     this.unacknowledged.push({
       crossing: Math.max(0, this.queued() - this.largest) + crossingBytes,
       at,
       end: this.transmittedBytes,
       probe,
-      blind,
     })
   }
 
-  /** Sets `wholeUpTo` by the rate, the ping interval, and whether the link is known slow. */
+  /** Sets `wholeUpTo` by the rate and the ping interval. */
   private setWholeUpTo(): void {
     this.wholeUpTo =
-      this.fastest > 0
-        ? (this.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN
-        : this.slow
-          ? WIRE_PROBE_BYTES
-          : 2 * WIRE_PROBE_PAIR_BYTES
+      this.fastest > 0 ? (this.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN : 2 * WIRE_PROBE_PAIR_BYTES
     // What crosses within its ping deadline, twice the interval: on any link a PING crosses, or at the floor.
     this.unannouncedUpTo = Math.min(
       this.wholeUpTo,
       Math.max(WIRE_PROBE_FIRST_BYTES, this.floor * 2 * this.pingInterval),
     )
-  }
-
-  /** Probes with one small piece, until a measured rate says otherwise. */
-  markSlow(): void {
-    this.slow = true
-    this.setWholeUpTo()
   }
 
   /** Until when its receiver, which acknowledges each announced message, may take to acknowledge the next, at the rate it
@@ -316,11 +278,6 @@ class PieceSender {
     if (next === undefined || rate === 0) return 0
     const from = Math.max(next.at, this.acknowledgedAt)
     return from + (WIRE_ANNOUNCED_WAIT_MARGIN * (next.end - this.acknowledgedBytes)) / rate
-  }
-
-  /** Whether its receiver hasn't acknowledged a probe, or a frame cut by a lapsed rate. */
-  get stalled(): boolean {
-    return this.blindUnacknowledged > 0
   }
 
   /** Takes a PIECES_ACK: its receiver took `bytes` of the frames in all (mod 2^32), the newest `heldMs` before it sent
@@ -349,7 +306,6 @@ class PieceSender {
     }
     while (this.unacknowledged.length > 0 && this.unacknowledged.peek()!.end <= this.acknowledgedBytes) {
       const sent = this.unacknowledged.shift()!
-      if (sent.blind) this.blindUnacknowledged--
       // Within one tick of a coarsened clock a sample says nothing of the rate, but a probe's, which is small: it
       // crossed within a tick.
       if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
@@ -400,7 +356,7 @@ class PieceSender {
     if (this.rest !== null && this.probe === null) this.release()
   }
 
-  /** Sends what waited for the probe, now that it measured a rate, or for room. */
+  /** Sends what waited for room, as far as it goes now, and the frames held behind it. */
   private release(): void {
     const { frame, offset } = this.rest!
     this.rest = null

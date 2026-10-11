@@ -206,8 +206,6 @@ export const WIRE_PROBE_PAIR_BYTES = 2 * 1024
 /** The most the first message a WebSocket announces carries, before its receiver dated any: what a ping deadline carries
  *  on any link a PING crosses. */
 export const WIRE_PROBE_FIRST_BYTES = 64
-/** The same on a link known slow, as one piece, whose crossing time alone measures the rate. */
-export const WIRE_PROBE_BYTES = 256
 /** The least time a probe's measure takes: the coarsest clock a browser gives a page. */
 export const WIRE_PROBE_CLOCK_MS = 1
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */

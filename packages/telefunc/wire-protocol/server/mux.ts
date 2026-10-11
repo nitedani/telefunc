@@ -81,8 +81,6 @@ type ReconcileOutcome = {
    *  when the transport sends it after that batch. */
   attached: ChannelHandle[]
   finalizeUpgrade: (() => void) | null
-  /** The link is slow, by the page's RECONCILE or by a wire of the session lost with a frame in flight. */
-  slow: boolean
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
@@ -336,7 +334,6 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
-        ...(outcome.slow ? { slow: true as const } : {}),
         serverReplayBuffer: this.options.serverReplayBuffer,
         serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,
@@ -368,31 +365,10 @@ class ChannelMux {
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
     const stagedWs = this.stagedByPrevSession.get(sessionId)
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
-    this.markSlowIfStalled(entry, sessionId)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
-  }
-
-  /** A session whose wire holds a frame its page never acknowledged, with no rate measured, is on a slow link. */
-  private markSlowIfStalled(entry: ConnectionEntry, sessionId: string): void {
-    if (entry.state.pieces?.sender.stalled) this.sessions.markSlow(sessionId)
-  }
-
-  /** Whether the link is slow, by the page's RECONCILE or by a wire of its session lost with a frame in flight; its new
-   *  wire then starts splitting. */
-  private settleSlowLink(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): boolean {
-    let slow = ctrl.slow === true
-    if (ctrl.sessionId !== undefined) {
-      // A page that found its wire dead first reconnects while the server still holds it open.
-      const prior = this.sessionWires.get(ctrl.sessionId)
-      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
-      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
-      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
-    }
-    if (slow) entry.state.pieces?.sender.markSlow()
-    return slow
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -787,7 +763,6 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const slow = this.settleSlowLink(ctrl, entry, connection)
     const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
     const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
@@ -823,7 +798,7 @@ class ChannelMux {
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     state.attaching.clear()
-    return { sessionId: newSessionId, attached, finalizeUpgrade, slow, deliverTo: connection }
+    return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
 
   private reconcileSession(
@@ -1176,8 +1151,6 @@ class ChannelMux {
 class SessionRegistry {
   private readonly bySession = new Map<string, Map<number, ChannelHandle>>()
   private readonly byChannel = new Map<string, Map<string, number>>()
-  /** Sessions whose last wire was lost with a frame in flight, before it measured a rate. */
-  private readonly slow = new Set<string>()
 
   get(sessionId: string, ix: number): ChannelHandle | undefined {
     return this.bySession.get(sessionId)?.get(ix)
@@ -1212,20 +1185,11 @@ class SessionRegistry {
     bindings.set(sessionId, h.ix)
   }
 
-  markSlow(sessionId: string): void {
-    if (this.bySession.has(sessionId)) this.slow.add(sessionId)
-  }
-
-  takeSlow(sessionId: string): boolean {
-    return this.slow.delete(sessionId)
-  }
-
   /** Returns the removed session so callers can drive per-handle lifecycle side effects. */
   removeSession(sessionId: string): Map<number, ChannelHandle> | undefined {
     const session = this.bySession.get(sessionId)
     if (!session) return undefined
     this.bySession.delete(sessionId)
-    this.slow.delete(sessionId)
     for (const handle of session.values()) {
       const bindings = this.byChannel.get(handle.channel.id)
       if (!bindings) continue
@@ -1245,10 +1209,7 @@ class SessionRegistry {
       session.delete(ix)
       // Last channel gone: drop the session, or it outlives every reconcile that could
       // ever name it (transient-closed sessions are otherwise only removed by reconcile).
-      if (session.size === 0) {
-        this.bySession.delete(sessionId)
-        this.slow.delete(sessionId)
-      }
+      if (session.size === 0) this.bySession.delete(sessionId)
     }
   }
 }

@@ -239,8 +239,6 @@ type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 type ReconcilePayload = {
   sessionId?: string
   open: ReconcileOpenEntry[]
-  /** A wire of the page's was lost with a frame in flight and no rate measured: the link is too slow for big frames. */
-  slow?: true
 }
 
 /** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
@@ -282,8 +280,6 @@ type ReconciledPayload = {
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
   upgradeId?: string
-  /** The link is slow: as `ReconcilePayload.slow` for a wire of the server's, or because the RECONCILE said it. */
-  slow?: true
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.
@@ -901,7 +897,6 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
   const payload = asObject(value)
   parseOpenList(payload)
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
-  assertProtocol(payload.slow === undefined || payload.slow === true, 'RECONCILE slow')
   return payload as ReconcilePayload
 }
 

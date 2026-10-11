@@ -293,8 +293,6 @@ type ClientChannelTransport = {
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
-  /** Whether its last wire held a frame its receiver never acknowledged, before it measured a rate. */
-  stalled(): boolean
   /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
@@ -509,9 +507,6 @@ class ClientConnection implements MuxConnection {
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
-  /** For the page's life, once a wire was lost, here or the server's word, with a frame in flight and no rate measured,
-   *  or silent past its RECONCILE deadline. */
-  private slowLink = false
   /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
   private provisionalHeartbeat = false
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
@@ -1177,8 +1172,6 @@ class ClientConnection implements MuxConnection {
     // delivered nothing for the deadline.
     const quiet = this.transport.quietFor()
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
-    // RECONCILED never came, so neither did the session by which the server would tell the next wire the link is slow.
-    this.slowLink = true
     this.dropWire(this.transport)
   }
 
@@ -1223,10 +1216,6 @@ class ClientConnection implements MuxConnection {
     transport.dispose()
   }
 
-  get _slowLink(): boolean {
-    return this.slowLink
-  }
-
   _onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -1236,7 +1225,6 @@ class ClientConnection implements MuxConnection {
       }
       return
     }
-    if (transport.stalled()) this.slowLink = true
     if (this.state.tag === 'open' && this.state.upgrade.tag !== 'none' && !this.flipped) {
       this.state.upgrade.attempt.abort()
     }
@@ -1257,7 +1245,6 @@ class ClientConnection implements MuxConnection {
       committing.committed = true
     }
     this.transport.applyReconciledSettings(ctrl)
-    if (ctrl.slow) this.slowLink = true
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
@@ -1550,7 +1537,6 @@ class ClientConnection implements MuxConnection {
     const reconcile: ReconcilePayload = {
       open,
       ...(this.sessionId ? { sessionId: this.sessionId } : {}),
-      ...(this.slowLink ? { slow: true as const } : {}),
     }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
@@ -2083,7 +2069,6 @@ class WsTransport implements UpgradeTarget {
   }
 
   private setupHandlers(ws: WebSocket, sender: PieceSender, pieces: PieceReceiver): void {
-    if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
     this.pieces = pieces
     const budget = new SendBudget(sender)
@@ -2129,10 +2114,6 @@ class WsTransport implements UpgradeTarget {
 
   hasWire(): boolean {
     return this.ws !== null
-  }
-
-  stalled(): boolean {
-    return this.pieceSender?.stalled === true
   }
 
   isConnecting(): boolean {
@@ -2183,7 +2164,6 @@ class WsTransport implements UpgradeTarget {
     this.pingInterval = ctrl.pingInterval
     // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
     this.pieceSender.answered(performance.now())
-    if (ctrl.slow) this.pieceSender.markSlow()
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
@@ -2347,10 +2327,6 @@ class SseTransport implements UpgradeSource {
 
   hasWire(): boolean {
     return this.transportAbort !== null
-  }
-
-  stalled(): boolean {
-    return false
   }
 
   isConnecting(): boolean {
