@@ -7,6 +7,7 @@ import {
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from './constants.js'
+import { Link } from './link.js'
 import { PieceSender } from './pieces.js'
 import { SendBudget } from './send-budget.js'
 import { TAG } from './shared-ws.js'
@@ -19,21 +20,27 @@ const flowControl = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0:
 /** The bytes of the probe by which its sender measured its rate, so it hands the socket what it is sent at once. */
 const PROBE = 5_000
 
-/** A budget on a clock the test sets. */
+/** A budget on a wire whose rate a probe measured, on a clock the test sets. */
 async function open() {
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
-  const sender = new PieceSender(
+  const link = new Link()
+  const prober = new PieceSender(
     () => {},
     () => 0,
+    link,
   )
-  sender.send(data(PROBE), 5_000)
+  prober.send(data(PROBE), 5_000)
   // It goes behind an announcement, at the end of the task.
   await Promise.resolve()
-  sender.acknowledged(WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, 0, 0)
-  sender.acknowledged(PROBE, 0, 0)
-  const budget = new SendBudget(sender)
-  let sent = PROBE
+  prober.acknowledged(WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, 0, 0)
+  prober.acknowledged(PROBE, 0, 0)
+  const budget = new SendBudget(
+    () => {},
+    () => 0,
+    link,
+  )
+  let sent = 0
   /** Sends a data frame and has the server acknowledge it `spanMs` after the one before it. The allowance, with nothing
    *  unacknowledged. */
   const exchange = (bytes: number, spanMs: number) => {
@@ -43,7 +50,7 @@ async function open() {
     expect(budget.acknowledged(sent, 0, spanMs * 1_000)).toBe(true)
     return budget.room
   }
-  return { budget, clock, exchange }
+  return { budget, link, clock, exchange }
 }
 
 // The server acknowledges what arrived once `WIRE_PIECES_ACK_BYTES` did, so that much may have arrived unacknowledged.
@@ -55,7 +62,7 @@ test('data goes out until the allowance and what the server holds before it ackn
   budget.send(data(40_000), 5_000)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBeLessThan(0)
-  expect(budget.acknowledged(PROBE + 80_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(80_000, 0, 0)).toBe(true)
   expect(budget.room).toBeGreaterThan(0)
 })
 
@@ -63,7 +70,7 @@ test('the frames that go at once count against the room, and are not dated', asy
   const { budget } = await open()
   budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
-  expect(budget.acknowledged(PROBE + WIRE_PIECES_ACK_BYTES + 1_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(WIRE_PIECES_ACK_BYTES + 1_000, 0, 0)).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
@@ -104,19 +111,19 @@ test('a wait that stays over the target with the least allowance is the path hav
 
 // A rate measured while the page sent little lags one it sends more at: the data acknowledged is out of the uplink anyway.
 test('a frame that goes at once waits behind none of the data the server acknowledged, however slow the rate measured so far', async () => {
-  const { budget, clock, exchange } = await open()
+  const { budget, link, clock, exchange } = await open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   budget.send(data(50_000), 5_000)
-  expect(budget.waitNow()).toBeGreaterThan(0)
+  expect(link.waitNow()).toBeGreaterThan(0)
   clock.now += 10
-  expect(budget.acknowledged(PROBE + 70_000, 0, 10_000)).toBe(true)
-  expect(budget.waitNow()).toBe(0)
+  expect(budget.acknowledged(70_000, 0, 10_000)).toBe(true)
+  expect(link.waitNow()).toBe(0)
 })
 
 // A burst under the room keeps a slow uplink as busy as one past it: the frames that go at once wait behind either.
 test('the longest wait since an instant is what a frame that went at once after it waited, whether the room ran out or not', async () => {
-  const { budget, clock, exchange } = await open()
+  const { budget, link, clock, exchange } = await open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   const start = clock.now
@@ -124,11 +131,11 @@ test('the longest wait since an instant is what a frame that went at once after 
   expect(budget.room).toBeGreaterThan(0)
   budget.send(flowControl(100), 5_000)
   // 20 KB at 100 B/ms.
-  expect(budget.longestWaitSince(start)).toBe(200)
+  expect(link.longestWaitSince(start)).toBe(200)
   clock.now += 150
   // The uplink drained 15 KB of it since: a frame sent now waits 50 ms, the one before still waited 200.
-  expect(budget.waitNow()).toBe(50)
-  expect(budget.longestWaitSince(start)).toBe(200)
+  expect(link.waitNow()).toBe(50)
+  expect(link.longestWaitSince(start)).toBe(200)
   // Since a later instant, only what a frame sent then waits.
-  expect(budget.longestWaitSince(clock.now)).toBe(50)
+  expect(link.longestWaitSince(clock.now)).toBe(50)
 })

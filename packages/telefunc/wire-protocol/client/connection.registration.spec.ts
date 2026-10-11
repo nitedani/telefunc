@@ -746,7 +746,6 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
       RECONCILED,
       BDP_PING,
       TEXT,
-      BDP_PING_ACK,
       WINDOW,
       MSG_WINDOW,
       RECONCILED,

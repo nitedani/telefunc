@@ -1,5 +1,5 @@
 export { BdpEstimator }
-export type { GrowDecision, AxisDecision, SendWait }
+export type { GrowDecision, AxisDecision }
 
 import {
   BDP_PING_MAX_INTERVAL_MS,
@@ -9,6 +9,7 @@ import {
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
+import type { Link, SendWait } from '../link.js'
 
 /** Per-axis verdict on a settled probe. `grow` = the sample saturated ≥ 2/3 of the current window, which is not at
  *  cap, and for the byte window, the sample leaves the sender's queue out: taken at the path's round trip where an
@@ -17,15 +18,6 @@ import {
  *  its credit ran out.
  *  `window-grew` = the probe went out after a window grew, so what the sender says covers the smaller one. */
 type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 'at-cap'
-
-/** How long the frames this side sends at once wait behind its own data on its wire, where it can tell (see
- *  `SendBudget`). */
-type SendWait = {
-  /** What a frame sent now waits. */
-  waitNow(): number
-  /** The longest such a frame waited since `at`, on `performance.now()`'s clock, or one sent now waits. */
-  longestWaitSince(at: number): number
-}
 
 /** `acknowledged` is true when a ping was in flight to settle (false for
  *  a stale ack arriving after a transport reset, and for an attach's probe). Per-axis decisions are
@@ -52,7 +44,8 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *      receiver dispatches per round trip, which `FlowControl` gates on its own load. Three
  *      things tell the queue from the path:
  *      - an attach carries a probe the sender answers before any of the channel's frames,
- *        so its round trip is the path's. A later sample counts at that round trip, as its
+ *        so its round trip is the path's, for every channel on its wire (see `Link`). A
+ *        later sample counts at that round trip, as its
  *        delivery rate times the path's RTT, which is BBR's estimate: that leaves out a
  *        queue wherever it is, the kernel's send buffer included. A server's receive side
  *        has no attach of its own to probe: each ack of its sender, the page, says the round
@@ -118,12 +111,11 @@ class BdpEstimator {
   private _pingSentAt = 0
   /** Attach probes not answered yet. Each measures its wire's round trip and settles no growth, so none holds up a ping:
    *  one lost with its wire, or with an upgrade that didn't happen, costs nothing. */
-  private _attachProbes: { probe: number; sentAt: number; wire: number }[] = []
-  /** The least round trip a probe took on the wire an attach's probe last measured, since it did. `Infinity` before. */
-  private _pathRtt = Infinity
-  private _pathWire = -1
+  private _attachProbes: { probe: number; sentAt: number; link: Link }[] = []
+  /** The wire it attached on last, whose round trip a sample counts at. */
+  private _link: Link | null = null
   /** The round trip a round the window held back took, which a queue can't have lengthened, since the wire was
-   *  replaced: lowered as `_pathRtt` is. `Infinity` before. */
+   *  replaced: lowered as the path's is. `Infinity` before. */
   private _boundRtt = Infinity
   private _lastPingAt = 0
   /** How long the ping in flight waited behind this side's own data on its wire. */
@@ -159,11 +151,6 @@ class BdpEstimator {
     return this._ping
   }
 
-  /** The round trip of the path an attach's probe on `wire` measured (see `probeAttach`), `Infinity` where none did. */
-  pathRtt(wire: number): number {
-    return wire === this._pathWire ? this._pathRtt : Infinity
-  }
-
   /** Record one received frame (pre-app-processing). Returns true iff a `BDP_PING`, of the
    *  number `probe` reads, should be emitted: caller fires `sendBdpPing()` synchronously, and it waits for what
    *  `sendWait` says. A single probe collects samples for both axes — `onPingAck` then derives independent
@@ -190,16 +177,20 @@ class BdpEstimator {
     return probe
   }
 
-  /** Start a probe that goes out with an attach on `wire`, and return its number, which the RECONCILE entry carries, or
-   *  `undefined` where that wire's round trip is measured already. Wires are numbered in the order they attach: an
-   *  answer measures a round trip for a later wire than the last measured, lowers it for that wire, and one for an
-   *  earlier wire, gone since, is ignored. */
-  probeAttach(wire: number): number | undefined {
-    if (wire === this._pathWire) return undefined
-    this._attachProbes = this._attachProbes.filter((attach) => attach.wire >= wire)
+  /** Start a probe that goes out with an attach on `link`, and return its number, which the RECONCILE entry carries, or
+   *  `undefined` where that wire's round trip is measured already. Its answer measures the wire's round trip, lowers it
+   *  if measured, and one for a wire gone since measures nothing anyone reads. */
+  probeAttach(link: Link): number | undefined {
+    if (link.pathRtt < Infinity) return undefined
+    this._attachProbes = this._attachProbes.filter((attach) => attach.link === link || attach.link === this._link)
     this._probes = (this._probes + 1) >>> 0
-    this._attachProbes.push({ probe: this._probes, sentAt: performance.now(), wire })
+    this._attachProbes.push({ probe: this._probes, sentAt: performance.now(), link })
     return this._probes
+  }
+
+  /** It attached on `link`. */
+  attach(link: Link): void {
+    this._link = link
   }
 
   /** Settle the `BDP_PING` in flight against its `BDP_PING_ACK`, which says the least the sender's wire held whenever its
@@ -218,20 +209,17 @@ class BdpEstimator {
     const attach = this._attachProbes.find((pending) => pending.probe === probe)
     if (attach) {
       this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
-      const { sentAt, wire } = attach
-      if (wire < this._pathWire) return NOT_SETTLED
-      const rtt = performance.now() - sentAt
-      this._pathRtt = wire === this._pathWire ? Math.min(this._pathRtt, rtt) : rtt
-      this._pathWire = wire
+      attach.link.measured(performance.now() - attach.sentAt)
       return NOT_SETTLED
     }
     if (!this._pingInFlight || probe !== this._ping) return NOT_SETTLED
     this._pingInFlight = false
     const now = performance.now()
     const rtt = now - this._pingSentAt
-    // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later one
+    // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later ping
     // that took less shows the path takes no more.
-    if (this._pathRtt < Infinity && rtt < this._pathRtt) this._pathRtt = rtt
+    const link = this._link
+    if (link !== null && link.pathRtt < Infinity && rtt < link.pathRtt) link.pathRtt = rtt
     const roundWait = sendWait?.longestWaitSince(this._pingSentAt) ?? 0
     const roundRtt = Math.max(1, rtt - this._pingWait)
     if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
@@ -246,7 +234,7 @@ class BdpEstimator {
     // Where an attach measured the path's round trip, here or at the sender, that tells a queue from the path, wherever
     // the queue is, as does a round the window held back, which took longer if the path's rose since. Else only the sender
     // can, where its runtime reports what its wire holds.
-    let pathRtt = Math.min(this._pathRtt, senderPathRtt)
+    let pathRtt = Math.min(link?.pathRtt ?? Infinity, senderPathRtt)
     if (this._boundRtt < Infinity) pathRtt = pathRtt < Infinity ? Math.max(pathRtt, this._boundRtt) : this._boundRtt
     const measured = pathRtt < Infinity
     const loopRtt = pathRtt + roundWait

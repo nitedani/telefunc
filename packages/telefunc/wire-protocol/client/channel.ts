@@ -47,6 +47,7 @@ import {
   type ChannelTransports,
 } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
+import type { Link } from '../link.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
@@ -268,8 +269,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
    *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
-  _reattachState(wire: number, batched: boolean): ReattachState {
-    const probe = batched ? undefined : this._flow.probeAttach(wire)
+  _reattachState(link: Link, batched: boolean): ReattachState {
+    const probe = batched ? undefined : this._flow.probeAttach(link)
     return probe === undefined ? {} : { probe }
   }
 
@@ -288,10 +289,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
-  _onTransportOpen(batched: boolean, wire: number): void {
+  _onTransportOpen(batched: boolean, link: Link): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    this._flow.attach(wire)
+    this._flow.attach(link)
     this._fireOpen()
   }
 

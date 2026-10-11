@@ -1,11 +1,11 @@
 export { PieceSender, PieceReceiver }
+export type { SendRoom }
 
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
   WIRE_ANNOUNCED_WAIT_MARGIN,
   WIRE_PIECES_ACK_BYTES,
   WIRE_PIECE_RATE_MARGIN,
-  WIRE_PIECE_RATE_WINDOW_MS,
   WIRE_PIECES_ACK_GAP_MS,
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
@@ -13,6 +13,7 @@ import {
   WIRE_ROOM_PIECE_MIN_BYTES,
   WIRE_SEND_ACK_GAP_MS,
 } from './constants.js'
+import { Link } from './link.js'
 import { TAG, assertProtocol, encode, isSequencedTag } from './shared-ws.js'
 import { Fifo } from '../utils/Fifo.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
@@ -28,6 +29,16 @@ function announcedNext(last: number, floor: number): number {
   return last === 0 && floor === 0 ? WIRE_PROBE_FIRST_BYTES : Math.max(2 * last, WIRE_ANNOUNCED_MIN_BYTES)
 }
 
+/** How much data a sender hands its socket: a page's `SendBudget`. */
+type SendRoom = {
+  /** With a rate measured, the most bytes of data it hands the socket now. */
+  dataRoom(): number
+  /** It handed the socket `bytes` of data. */
+  handed(bytes: number): void
+}
+
+const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
+
 /** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. With a
  *  rate measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a larger frame
  *  starts with a probe pair, whose acknowledgements measure the rate, and goes at once with the frames sent in its task,
@@ -35,8 +46,8 @@ function announcedNext(last: number, floor: number): number {
  *  `announcedNext` allows. So does a smaller data frame, unless it crosses within its ping deadline: one of
  *  `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at the floor, the rate the link carries at least by what its
  *  receiver took by an answer, a heartbeat or an acknowledged announcement. A smaller control frame, such as the
- *  handshake's, goes whole. With a rate measured, a data frame past `dataRoom`
- *  goes in pieces as far as that goes, and its rest waits for `sendHeld`: the frames after it wait too, but those that
+ *  handshake's, goes whole. With a rate measured, a data frame past its room (see `SendRoom`) goes in pieces as far as
+ *  that goes, and its rest waits for `sendHeld`: the frames after it wait too, but those that
  *  aren't data and go whole, as a window update does. */
 class PieceSender {
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
@@ -49,10 +60,6 @@ class PieceSender {
   private firstAt = 0
   /** The bytes of the frames handed to the socket. */
   transmittedBytes = 0
-  /** With a rate measured, the most bytes of data it hands the socket now; and what it calls with the bytes of data it
-   *  hands the socket. A page's `SendBudget` sets both. */
-  dataRoom = (): number => Number.POSITIVE_INFINITY
-  onData = (_bytes: number): void => {}
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
   private probe: { end: number; second: number | null } | null = null
   /** The rest of a data frame, waiting for room. */
@@ -69,9 +76,7 @@ class PieceSender {
   private acknowledgedAt = 0
   /** Each announcement its receiver hasn't acknowledged: where its bytes start and end, of all it sent, and when. */
   private readonly announcements = new Fifo<{ start: number; end: number; at: number }>()
-  /** In bytes per ms, a rate the link carries at least: what crossed from its sending to an answer, a heartbeat or an
-   *  acknowledgement saying it arrived; and as its newest ANNOUNCE named it. */
-  private floor = 0
+  /** In bytes per ms, the floor its newest ANNOUNCE named (see `Link.floor`). */
   private namedFloor = 0
   /** With no rate measured, a frame this size or smaller goes unannounced. */
   private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES
@@ -81,15 +86,14 @@ class PieceSender {
   private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
-  /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed.
-   *  Past `WIRE_PIECE_RATE_WINDOW_MS` after it last rose, it still cuts, until the next measure replaces it. */
-  private fastest = 0
-  private roseAt = 0
 
   constructor(
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
     /** The bytes its socket holds unsent. */
     private readonly queued: () => number,
+    /** Its wire's: the rates it measures go there. */
+    private readonly link = new Link(),
+    private readonly room = UNBOUNDED,
   ) {}
 
   /** Sends `frame`, whole or in pieces. */
@@ -119,7 +123,7 @@ class PieceSender {
     const bytes = frame.byteLength
     return (
       this.probe !== null ||
-      (this.fastest === 0 && bytes > this.unannouncedUpTo && (bytes > this.wholeUpTo || isSequencedTag(frame[0]!)))
+      (this.link.fastest === 0 && bytes > this.unannouncedUpTo && (bytes > this.wholeUpTo || isSequencedTag(frame[0]!)))
     )
   }
 
@@ -133,19 +137,19 @@ class PieceSender {
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
     if (bytes > this.largest) this.largest = bytes
-    if (bytes > this.wholeUpTo || (this.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.dataRoom()))
+    if (bytes > this.wholeUpTo || (this.link.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.room.dataRoom()))
       return this.cut(frame, 0)
     this.transmitted(frame, bytes)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.transmit(frame)
   }
 
-  /** Hands the socket `frame` from `offset` in pieces, of data as far as `dataRoom` goes once it takes
+  /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes once it takes
    *  `WIRE_ROOM_PIECE_MIN_BYTES` or the rest, and holds the rest. */
   private cut(frame: Uint8Array<ArrayBuffer>, offset: number): void {
     const bytes = frame.byteLength
     const now = performance.now()
-    const room = Math.max(0, Math.floor(this.dataRoom()))
+    const room = Math.max(0, Math.floor(this.room.dataRoom()))
     const end = !isSequencedTag(frame[0]!)
       ? bytes
       : room < Math.min(WIRE_ROOM_PIECE_MIN_BYTES, bytes - offset)
@@ -166,7 +170,7 @@ class PieceSender {
   /** Counts `bytes` of `frame` handed to the socket. */
   private transmitted(frame: Uint8Array<ArrayBuffer>, bytes: number): void {
     this.transmittedBytes += bytes
-    if (isSequencedTag(frame[0]!)) this.onData(bytes)
+    if (isSequencedTag(frame[0]!)) this.room.handed(bytes)
   }
 
   /** Holds `frame` from `offset`, for room. */
@@ -180,7 +184,7 @@ class PieceSender {
     this.announcing = false
     const now = performance.now()
     const start = this.transmittedBytes
-    const floorPerS = Math.min(0xffffffff, Math.floor(this.floor * 1000))
+    const floorPerS = Math.min(0xffffffff, Math.floor(this.link.floor * 1000))
     this.namedFloor = floorPerS / 1000
     this.transmit(encode.announce(this.heldBytes, floorPerS))
     while (this.held.length > 0) {
@@ -188,7 +192,7 @@ class PieceSender {
       const bytes = frame.byteLength
       this.heldBytes -= bytes
       if (bytes > this.largest) this.largest = bytes
-      if (this.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
+      if (this.link.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
       else this.sendAnnounced(frame, 0, now)
     }
     this.announcements.push({ start, end: this.transmittedBytes, at: now })
@@ -261,11 +265,13 @@ class PieceSender {
   /** Sets `wholeUpTo` by the rate and the ping interval. */
   private setWholeUpTo(): void {
     this.wholeUpTo =
-      this.fastest > 0 ? (this.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN : 2 * WIRE_PROBE_PAIR_BYTES
+      this.link.fastest > 0
+        ? (this.link.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN
+        : 2 * WIRE_PROBE_PAIR_BYTES
     // What crosses within its ping deadline, twice the interval: on any link a PING crosses, or at the floor.
     this.unannouncedUpTo = Math.min(
       this.wholeUpTo,
-      Math.max(WIRE_PROBE_FIRST_BYTES, this.floor * 2 * this.pingInterval),
+      Math.max(WIRE_PROBE_FIRST_BYTES, this.link.floor * 2 * this.pingInterval),
     )
   }
 
@@ -274,7 +280,7 @@ class PieceSender {
    *  acknowledgement came if later; 0 for none. */
   get acknowledgedBy(): number {
     const next = this.announcedEnds.peek()
-    const rate = this.fastest || this.floor
+    const rate = this.link.fastest || this.link.floor
     if (next === undefined || rate === 0) return 0
     const from = Math.max(next.at, this.acknowledgedAt)
     return from + (WIRE_ANNOUNCED_WAIT_MARGIN * (next.end - this.acknowledgedBytes)) / rate
@@ -335,23 +341,14 @@ class PieceSender {
   }
 
   private raiseFloor(floor: number): void {
-    if (!(floor > this.floor)) return
-    this.floor = floor
-    this.setWholeUpTo()
+    if (this.link.raiseFloor(floor)) this.setWholeUpTo()
   }
 
   private rise(rate: number, at: number): void {
-    if (!(rate > this.fastest) && !this.lapsed(at)) return
-    this.fastest = rate
-    this.roseAt = at
-    this.setWholeUpTo()
+    if (this.link.rise(rate, at)) this.setWholeUpTo()
   }
 
-  private lapsed(at: number): boolean {
-    return this.fastest === 0 || at - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS
-  }
-
-  /** Sends what waits for room, as far as `dataRoom` goes now. */
+  /** Sends what waits for room, as far as its room goes now. */
   sendHeld(): void {
     if (this.rest !== null && this.probe === null) this.release()
   }

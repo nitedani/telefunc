@@ -1,7 +1,8 @@
 export { FlowControl, replayWindow }
 export type { FlowControlEmit }
 
-import { BdpEstimator, type SendWait } from './bdp-estimator.js'
+import { BdpEstimator } from './bdp-estimator.js'
+import type { Link, SendWait } from '../link.js'
 import { macrotaskYield } from './macrotask-yield.js'
 import {
   CREDIT_MSG_WINDOW_INITIAL,
@@ -56,8 +57,8 @@ function replayWindow(text: number, binary: number): number {
  */
 class FlowControl {
   private _bdp = new BdpEstimator()
-  /** The connection's wire at the last `attach`. */
-  private _wire: number | null = null
+  /** The wire of the last `attach`. */
+  private _link: Link | null = null
   // Sender side: what this side has sent, and the peer's limits.
   private _sentBytes = 0
   private _sentMessages = 0
@@ -131,10 +132,10 @@ class FlowControl {
     return this._peerByteWindowMax
   }
 
-  /** The round trip of the path the probe of the last `attach` measured, `Infinity` where none did: what this side's
-   *  answer to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
+  /** The round trip of the path of the last `attach`'s wire, as an attach's probe measured it, `Infinity` where none
+   *  did: what this side's answer to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
   pathRtt(): number {
-    return this._wire === null ? Infinity : this._bdp.pathRtt(this._wire)
+    return this._link?.pathRtt ?? Infinity
   }
 
   /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`): this side grants its peer
@@ -219,10 +220,10 @@ class FlowControl {
     if (this._bdp.onReceive(bytes, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
-  /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
+  /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `link`, which the peer answers before
    *  any of the channel's frames (see `BdpEstimator`), or `undefined` where that wire's round trip is measured already. */
-  probeAttach(wire: number): number | undefined {
-    return this._bdp.probeAttach(wire)
+  probeAttach(link: Link): number | undefined {
+    return this._bdp.probeAttach(link)
   }
 
   /** Receiver-side: account post-callback consumption of one frame. Emits
@@ -304,11 +305,11 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on the connection's `wire`. The wire of the last attach lost nothing to repair, and still answers the probe
-   *  in flight. */
-  attach(wire: number): void {
-    if (wire !== this._wire) this.reattach()
-    this._wire = wire
+  /** Attach on `link`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
+  attach(link: Link): void {
+    if (link !== this._link) this.reattach()
+    this._link = link
+    this._bdp.attach(link)
   }
 
   /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits go out again,

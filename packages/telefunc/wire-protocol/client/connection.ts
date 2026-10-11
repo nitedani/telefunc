@@ -43,7 +43,7 @@ import { PieceReceiver, PieceSender } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
-import type { SendWait } from '../flow-control/bdp-estimator.js'
+import { Link, type SendWait } from '../link.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
@@ -96,11 +96,14 @@ type ProbeWire = {
   send: (frame: Uint8Array<ArrayBuffer>) => void
   onFrame: (cb: (frame: DecodedFrame, byteLength: number) => void) => void
   close: () => void
+  /** The wire it opens. */
+  link: Link
 }
 
 type ProbeSession = {
   upgradeId: string
   probeHeartbeat: Heartbeat
+  link: Link
 }
 
 /** Ping-then-pong-deadline loop. Each transport owns one for its wire; the upgrade probe
@@ -210,9 +213,8 @@ interface MuxChannel {
   readonly isClosed: boolean
   /** The largest frame its server takes. */
   readonly _maxFrameBytes: number
-  /** `wire` numbers the connection's wire: the number of the channel's last attach means that same wire, which lost
-   *  nothing. */
-  _onTransportOpen(batched: boolean, wire: number): void
+  /** `link` is the wire it opened on: the one of the channel's last attach means that same wire, which lost nothing. */
+  _onTransportOpen(batched: boolean, link: Link): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
   _onTransportBatched(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
@@ -221,9 +223,9 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
-  /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`, whose flow-control frames wait
+  /** What this channel declares in its RECONCILE entry on every (re)attach, on `link`, whose flow-control frames wait
    *  for a batched POST when `batched`. */
-  _reattachState(wire: number, batched: boolean): ReattachState
+  _reattachState(link: Link, batched: boolean): ReattachState
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
   _fitReplays(window: number, peerWindow: number): void
   /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
@@ -290,6 +292,8 @@ type ClientChannelTransport = {
   /** True iff client→server frames are per-POST batched instead of pushed onto
    *  one streaming body — signals the channel to use a larger initial window. */
   readonly batched: boolean
+  /** The wire it carries, or opens next. */
+  readonly link: Link
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
@@ -1251,7 +1255,7 @@ class ClientConnection implements MuxConnection {
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
-    for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched, this.wire)
+    for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched, this.transport.link)
     this.tryCompleteUpgrade()
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
@@ -1348,7 +1352,7 @@ class ClientConnection implements MuxConnection {
       return null
     }
     this.enterUpgradeReady(attempt)
-    return { upgradeId, probeHeartbeat }
+    return { upgradeId, probeHeartbeat, link: probe.link }
   }
 
   /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
@@ -1385,7 +1389,10 @@ class ClientConnection implements MuxConnection {
     await this.reconcileSettled(attempt.signal)
     if (attempt.signal.aborted) return
     this.enterUpgradeCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(() => this.buildBarrierFrame(sessionId, session.upgradeId), attempt.signal)
+    const emission = await from.emitBarrier(
+      () => this.buildBarrierFrame(sessionId, session.upgradeId, session.link),
+      attempt.signal,
+    )
 
     if (emission === 'not-emitted') {
       attempt.abort()
@@ -1533,7 +1540,11 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.declareOpenEntries({ skipUnnamed: false, wire: this.wire, batched: this.transport.batched })
+    const open = this.declareOpenEntries({
+      skipUnnamed: false,
+      link: this.transport.link,
+      batched: this.transport.batched,
+    })
     const reconcile: ReconcilePayload = {
       open,
       ...(this.sessionId ? { sessionId: this.sessionId } : {}),
@@ -1543,19 +1554,19 @@ class ClientConnection implements MuxConnection {
 
   /** The old wire's last frame. A channel the server awaits is listed, and its await moves to the new wire. One no
    *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
-  private buildBarrierFrame(sessionId: string, upgradeId: string): OutboundFrame {
-    // Its entries attach on the WebSocket, the wire after this one.
-    const open = this.declareOpenEntries({ skipUnnamed: true, wire: this.wire + 1, batched: false })
+  private buildBarrierFrame(sessionId: string, upgradeId: string, link: Link): OutboundFrame {
+    // Its entries attach on the WebSocket, `link`, the wire after this one.
+    const open = this.declareOpenEntries({ skipUnnamed: true, link, batched: false })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
   private declareOpenEntries({
     skipUnnamed,
-    wire,
+    link,
     batched,
   }: {
     skipUnnamed: boolean
-    wire: number
+    link: Link
     batched: boolean
   }): ReconcileOpenEntry[] {
     this.enterReconciling()
@@ -1578,7 +1589,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState(wire, batched)
+      const state = entry.channel._reattachState(link, batched)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
       open.push(payloadEntry)
@@ -1742,7 +1753,8 @@ class ClientConnection implements MuxConnection {
       // As `applyReconciled` does: its replay, then what it queued.
       for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
-      if (opened && entry.state.tag === 'open') entry.channel._onTransportOpen(this.transport.batched, this.wire)
+      if (opened && entry.state.tag === 'open')
+        entry.channel._onTransportOpen(this.transport.batched, this.transport.link)
     }
     this.startTtlIfIdle()
     this.maybeStartUpgrade()
@@ -1865,15 +1877,19 @@ class ClientConnection implements MuxConnection {
   }
 }
 
+/** What a WebSocket's frames go through, each way. */
+type WsEnds = { link: Link; budget: SendBudget; pieces: PieceReceiver }
+
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
   readonly sendReconcileOnOpen = true
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
+  link = new Link()
   private heartbeat: Heartbeat | null = null
-  /** The probe's socket, with the piece sender and receiver it keeps as the transport adopts it: the server counts every
-   *  frame the socket carries. */
-  private probed: { ws: WebSocket; sender: PieceSender; pieces: PieceReceiver } | null = null
+  /** The probe's socket, with the ends it keeps as the transport adopts it: the server counts every frame the socket
+   *  carries. */
+  private probed: ({ ws: WebSocket } & WsEnds) | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
@@ -1906,7 +1922,9 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const { sender, pieces } = this.pieceEnds(ws)
+    const ends = this.pieceEnds(ws)
+    const { budget, pieces } = ends
+    const { sender } = budget
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
@@ -1948,7 +1966,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
 
-    this.probed = { ws, sender, pieces }
+    this.probed = { ws, ...ends }
     return {
       ping: () => {
         try {
@@ -1977,6 +1995,7 @@ class WsTransport implements UpgradeTarget {
           ws.close()
         } catch {}
       },
+      link: ends.link,
     }
   }
 
@@ -1987,7 +2006,7 @@ class WsTransport implements UpgradeTarget {
     this.ws = probed.ws
     this.everOpened = true
     this.connecting = false
-    this.setupHandlers(probed.ws, probed.sender, probed.pieces)
+    this.setupHandlers(probed.ws, probed)
   }
 
   start(): void {
@@ -2012,8 +2031,7 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    const { sender, pieces } = this.pieceEnds(ws)
-    this.setupHandlers(ws, sender, pieces)
+    this.setupHandlers(ws, this.pieceEnds(ws))
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -2056,22 +2074,27 @@ class WsTransport implements UpgradeTarget {
     for (const cb of this.drainCallbacks.splice(0)) cb()
   }
 
-  /** Every frame `ws` carries goes through its sender, which counts the bytes its receiver acknowledges. */
-  private pieceEnds(ws: WebSocket): { sender: PieceSender; pieces: PieceReceiver } {
-    const sender = new PieceSender(
+  /** Every frame `ws` carries goes through its budget's sender, which counts the bytes its receiver acknowledges. */
+  private pieceEnds(ws: WebSocket): WsEnds {
+    const link = new Link()
+    const budget = new SendBudget(
       (message) => ws.send(message),
       () => ws.bufferedAmount,
+      link,
     )
+    const { sender } = budget
     return {
-      sender,
+      link,
+      budget,
       pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), { peerHoldsBack: false }),
     }
   }
 
-  private setupHandlers(ws: WebSocket, sender: PieceSender, pieces: PieceReceiver): void {
+  private setupHandlers(ws: WebSocket, { link, budget, pieces }: WsEnds): void {
+    const { sender } = budget
+    this.link = link
     this.pieceSender = sender
     this.pieces = pieces
-    const budget = new SendBudget(sender)
     this.budget = budget
     budget.onRoom = () => {
       if (this.ws !== ws) return
@@ -2131,7 +2154,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   sendWait(): SendWait | null {
-    return this.budget
+    return this.link
   }
 
   /** What its socket holds unsent, and what its piece sender holds for a probe. */
@@ -2232,6 +2255,7 @@ class SseTransport implements UpgradeSource {
   readonly reconcileMode = 'batch-on-reconcile' as const
   /** Each wire's own, so a POST still in flight for a wire that died isn't dispatched on the next one. */
   private connId = randomUuid()
+  link = new Link()
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
   }
@@ -2386,6 +2410,7 @@ class SseTransport implements UpgradeSource {
 
   private async openStream(): Promise<void> {
     this.connId = randomUuid()
+    this.link = new Link()
     const abortController = new AbortController()
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()

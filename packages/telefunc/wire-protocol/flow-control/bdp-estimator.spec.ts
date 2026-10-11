@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BdpEstimator } from './bdp-estimator.js'
+import { Link } from '../link.js'
 import {
   BDP_PING_MAX_INTERVAL_MS,
   BDP_PING_MIN_INTERVAL_MS,
@@ -167,9 +168,10 @@ describe('BdpEstimator', () => {
     return bdp.onPingAck(bdp.probe, backlog, Infinity, deliveredBefore, sendWait)
   }
 
-  /** An attach's probe on `wire`, answered `rttMs` after it went out. */
-  function attach(bdp: BdpEstimator, rttMs: number, wire: number) {
-    const probe = bdp.probeAttach(wire)!
+  /** An attach on `link`, whose probe is answered `rttMs` after it went out. */
+  function attach(bdp: BdpEstimator, rttMs: number, link = new Link()) {
+    const probe = bdp.probeAttach(link)!
+    bdp.attach(link)
     vi.advanceTimersByTime(rttMs)
     return bdp.onPingAck(probe, Infinity, Infinity, upToAck)
   }
@@ -179,7 +181,7 @@ describe('BdpEstimator', () => {
   it("counts a probe's sample at the round trip an attach's probe took", () => {
     const bdp = new BdpEstimator()
     // It settles no growth.
-    expect(attach(bdp, 50, 0).acknowledged).toBe(false)
+    expect(attach(bdp, 50).acknowledged).toBe(false)
     expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
     // One that took the path's round trip counts in full, whatever the sender says.
     expect(probeAfter(bdp, 50, HELD).bytes).toBe('grow')
@@ -189,7 +191,7 @@ describe('BdpEstimator', () => {
   // held its ack, so samples count at it, until a round takes less. A new wire may take another path.
   it('counts samples at the round trip of a round the window held back, where it is more than the one an attach measured', () => {
     const bdp = new BdpEstimator()
-    attach(bdp, 10, 0)
+    attach(bdp, 10)
     expect(probeAfter(bdp, 200, EMPTY).bytes).toBe('sample-too-small')
     expect(heldBack(bdp, 200).bytes).toBe('grow')
     expect(probeAfter(bdp, 200, HELD).bytes).toBe('grow')
@@ -204,7 +206,7 @@ describe('BdpEstimator', () => {
   // delivers at the link's rate up to the ack, at least the channel's own rate.
   it('counts a round the window held back at its round trip, whatever few frames of other channels its wire held and delivered', () => {
     const bdp = new BdpEstimator()
-    attach(bdp, 10, 0)
+    attach(bdp, 10)
     // In the last eighth of the round trip, an eighth of what the channel got in it: a queue at the channel's rate.
     expect(heldBack(bdp, 200, { deliveredBefore: () => bdp.byteWindow / 8 }).bytes).toBe('sample-too-small')
     expect(heldBack(bdp, 200, { backlog: bdp.byteWindow / 8 }).bytes).toBe('sample-too-small')
@@ -215,7 +217,7 @@ describe('BdpEstimator', () => {
   // refreshes wait too: a round counts at the path's round trip and the longest the receiver's frames waited in it.
   it("counts a round at the path's round trip and the longest the receiver's own frames waited in it", () => {
     const bdp = new BdpEstimator()
-    attach(bdp, 10, 0)
+    attach(bdp, 10)
     // The path takes 100 ms of the 200: the sample counts half.
     expect(heldBack(bdp, 200, { pingWait: 100 }).bytes).toBe('sample-too-small')
     expect(heldBack(bdp, 200, { pingWait: 100, roundWait: 100 }).bytes).toBe('grow')
@@ -226,7 +228,7 @@ describe('BdpEstimator', () => {
   it("grows a window whose round counts the receiver's wait to one and a half times the sample, at most double", () => {
     const bdp = new BdpEstimator()
     const window = bdp.byteWindow
-    attach(bdp, 10, 0)
+    attach(bdp, 10)
     expect(heldBack(bdp, 200, { pingWait: 100, roundWait: 100 }).bytes).toBe('grow')
     bdp.growBytes()
     // The sample is the window and the ping's byte.
@@ -253,21 +255,33 @@ describe('BdpEstimator', () => {
   })
 
   // A later wire, as one of batched POSTs whose attach isn't probed, may take another path, or wait for its POSTs.
-  it("says the round trip it measured only for the wire an attach's probe measured it on", () => {
+  it("measures the round trip of the wire an attach's probe went on, and of no other", () => {
+    const link = new Link()
+    attach(new BdpEstimator(), 50, link)
+    expect(link.pathRtt).toBe(50)
+    expect(new Link().pathRtt).toBe(Infinity)
+  })
+
+  // Every channel on a wire takes the path its round trip measures: one attach's probe measures it for all.
+  it("counts samples at the round trip another channel's attach measured on its wire, and probes that wire no more", () => {
+    const link = new Link()
+    attach(new BdpEstimator(), 50, link)
     const bdp = new BdpEstimator()
-    attach(bdp, 50, 0)
-    expect(bdp.pathRtt(0)).toBe(50)
-    expect(bdp.pathRtt(1)).toBe(Infinity)
+    expect(bdp.probeAttach(link)).toBeUndefined()
+    bdp.attach(link)
+    expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
+    expect(probeAfter(bdp, 50, HELD).bytes).toBe('grow')
   })
 
   // A registration's RECONCILE lists every channel again, on the same wire, where the answer waits behind what the
   // wire holds: a wire whose round trip is measured is probed no more. One on another wire measures another path.
   it("probes a wire's round trip once, and that of the next wire", () => {
     const bdp = new BdpEstimator()
-    attach(bdp, 50, 0)
-    expect(bdp.probeAttach(0)).toBeUndefined()
+    const link = new Link()
+    attach(bdp, 50, link)
+    expect(bdp.probeAttach(link)).toBeUndefined()
     expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
-    attach(bdp, 500, 1)
+    attach(bdp, 500)
     expect(probeAfter(bdp, 500, HELD).bytes).toBe('grow')
   })
 
@@ -275,8 +289,10 @@ describe('BdpEstimator', () => {
   // channel's frames don't hold up, counts.
   it('takes the least round trip of the probes of attaches on one wire in flight together', () => {
     const bdp = new BdpEstimator()
-    const first = bdp.probeAttach(0)!
-    const second = bdp.probeAttach(0)!
+    const link = new Link()
+    const first = bdp.probeAttach(link)!
+    const second = bdp.probeAttach(link)!
+    bdp.attach(link)
     vi.advanceTimersByTime(50)
     bdp.onPingAck(first, HELD, Infinity, upToAck)
     vi.advanceTimersByTime(450)
@@ -287,27 +303,32 @@ describe('BdpEstimator', () => {
   // One answered late, after a later wire's, rode a wire that is gone.
   it("ignores the answer to an earlier wire's probe once a later wire's round trip is measured", () => {
     const bdp = new BdpEstimator()
-    const early = bdp.probeAttach(0)!
-    attach(bdp, 500, 1)
+    const gone = new Link()
+    const early = bdp.probeAttach(gone)!
+    bdp.attach(gone)
+    attach(bdp, 500)
     bdp.onPingAck(early, HELD, Infinity, upToAck)
     expect(probeAfter(bdp, 500, HELD).bytes).toBe('grow')
   })
 
-  // An attach's probe is lost with its wire, or with an upgrade whose barrier never went out: the next wire, which may
-  // take the number that upgrade's WebSocket would have had, measures its own path.
+  // An attach's probe is lost with its wire, or with an upgrade whose barrier never went out: the next wire measures its
+  // own path.
   it("keeps probing while an attach's probe goes unanswered, and measures the path of the next wire", () => {
     const bdp = new BdpEstimator()
-    attach(bdp, 50, 0)
-    bdp.probeAttach(1)
+    attach(bdp, 50)
+    const next = new Link()
+    bdp.probeAttach(next)
     expect(probeAfter(bdp, 50, EMPTY).bytes).toBe('grow')
-    attach(bdp, 500, 1)
+    attach(bdp, 500, next)
     expect(probeAfter(bdp, 500, HELD).bytes).toBe('grow')
   })
 
   // The attach that resets the old wire's ping sent its probe on the new wire.
   it("measures the round trip of an attach's probe answered after the reset of that attach", () => {
     const bdp = new BdpEstimator()
-    const probe = bdp.probeAttach(0)!
+    const link = new Link()
+    const probe = bdp.probeAttach(link)!
+    bdp.attach(link)
     bdp.reset()
     vi.advanceTimersByTime(50)
     bdp.onPingAck(probe, HELD, Infinity, upToAck)
