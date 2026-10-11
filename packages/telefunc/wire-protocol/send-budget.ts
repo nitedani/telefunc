@@ -4,6 +4,8 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
   WIRE_PIECES_ACK_BYTES,
   WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_ACK_MIN_BYTES,
+  WIRE_SEND_ACK_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from './constants.js'
 import type { Link } from './link.js'
@@ -35,11 +37,13 @@ const SHED_SHARE = 0.5
  *  time on the link, it is the path's, and its wait is its delay less the least of those. While the wait is under
  *  `WIRE_QUEUE_DELAY_MS` the allowance grows by the bytes each ack covers, less as the wait nears it; past it, the
  *  allowance falls by the excess at the rate the server took. It is at least what the server takes in
- *  `WIRE_QUEUE_DELAY_MS`, within what keeps it acknowledging. */
+ *  `WIRE_QUEUE_DELAY_MS`, within what keeps it acknowledging, and starts there: on a slow uplink, what it would hold more
+ *  takes seconds to shed. */
 class SendBudget {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
-  private allowance = WIRE_SEND_AHEAD_MIN_BYTES
+  /** The allowance as measured delays moved it, null before the first: till then it is the least. */
+  private movedAllowance: number | null = null
   /** The data handed to the socket and not covered by an acknowledgement: where each part handed at once ends, of all
    *  the sender handed, its bytes, what the uplink held ahead of it, and when. */
   private readonly sent = new Fifo<{ end: number; bytes: number; ahead: number; at: number }>()
@@ -80,6 +84,10 @@ class SendBudget {
     const wait = this.link.waitNow()
     this.sender.send(frame, pingInterval)
     this.link.noteWait(wait)
+  }
+
+  private get allowance(): number {
+    return this.movedAllowance ?? this.least
   }
 
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
@@ -126,10 +134,10 @@ class SendBudget {
   private roomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.link.inUplink() + sent - this.sender.transmittedBytes)
-    // The server acknowledges what arrived once `WIRE_PIECES_ACK_BYTES` did: up to that much arrived unacknowledged.
-    // More arrives while an acknowledgement comes back, or would wait behind what the server sends now.
+    // Up to `slack` arrived unacknowledged. More arrives while an acknowledgement comes back, or would wait behind what
+    // the server sends now.
     const late = Math.max(this.lateMs, this.link.peerQueueWait())
-    const unarrived = unacknowledged - this.link.uplinkRate() * late - WIRE_PIECES_ACK_BYTES
+    const unarrived = unacknowledged - this.link.uplinkRate() * late - this.slack
     return this.allowance - Math.max(waiting, unarrived)
   }
 
@@ -177,24 +185,33 @@ class SendBudget {
     const path = drainRate > 0 ? delay - (newest.ahead + newest.bytes) / drainRate : delay
     // A path that stays over the target with the least allowance rose.
     const least = this.least
-    const atLeast = this.allowance === least
+    let allowance = this.allowance
+    const atLeast = allowance === least
     if (path < this.leastDelay || (atLeast && path - this.leastDelay >= WIRE_QUEUE_DELAY_MS)) this.leastDelay = path
     const wait = delay - this.leastDelay
     this.link.noteWait(Math.max(0, wait))
     if (wait < WIRE_QUEUE_DELAY_MS) {
-      this.allowance += (newly * (WIRE_QUEUE_DELAY_MS - wait)) / WIRE_QUEUE_DELAY_MS
+      allowance += (newly * (WIRE_QUEUE_DELAY_MS - wait)) / WIRE_QUEUE_DELAY_MS
     } else if (spanUs > 0) {
       const rate = newly / (spanUs / 1000)
-      this.allowance -= (SHED_SHARE * rate * (wait - WIRE_QUEUE_DELAY_MS) * newly) / this.allowance
+      allowance -= (SHED_SHARE * rate * (wait - WIRE_QUEUE_DELAY_MS) * newly) / allowance
     }
-    this.allowance = Math.min(CREDIT_WINDOW_MAX_BYTES, Math.max(least, this.allowance))
+    this.movedAllowance = Math.min(CREDIT_WINDOW_MAX_BYTES, Math.max(least, allowance))
   }
 
-  /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it waits for before it
-   *  acknowledges, and `WIRE_SEND_AHEAD_MIN_BYTES` at most or before its rate is measured. */
+  /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges,
+   *  and `WIRE_SEND_AHEAD_MIN_BYTES` at most or before its rate is measured. */
   private get least(): number {
     const { drainRate } = this.link
     if (drainRate === 0) return WIRE_SEND_AHEAD_MIN_BYTES
-    return Math.min(WIRE_SEND_AHEAD_MIN_BYTES, Math.max(WIRE_PIECES_ACK_BYTES + 1024, drainRate * WIRE_QUEUE_DELAY_MS))
+    return Math.min(WIRE_SEND_AHEAD_MIN_BYTES, Math.max(this.slack + 1024, drainRate * WIRE_QUEUE_DELAY_MS))
+  }
+
+  /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most, and where less,
+   *  `WIRE_SEND_ACK_MIN_BYTES` and what the uplink carries in `WIRE_SEND_ACK_MS` after them. */
+  private get slack(): number {
+    const { drainRate } = this.link
+    if (drainRate === 0) return WIRE_PIECES_ACK_BYTES
+    return Math.min(WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_MIN_BYTES + drainRate * WIRE_SEND_ACK_MS)
   }
 }

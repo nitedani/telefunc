@@ -114,10 +114,10 @@ test('a frame that goes at once waits behind none of the data the server acknowl
   const { budget, link, clock, exchange } = await open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
-  budget.send(data(50_000), 5_000)
+  budget.send(data(20_000), 5_000)
   expect(link.waitNow()).toBeGreaterThan(0)
   clock.now += 10
-  expect(budget.acknowledged(70_000, 0, 10_000)).toBe(true)
+  expect(budget.acknowledged(40_000, 0, 10_000)).toBe(true)
   expect(link.waitNow()).toBe(0)
 })
 

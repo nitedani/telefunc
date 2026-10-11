@@ -232,9 +232,6 @@ export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
  *  refresh moves the download's credit, an acknowledgement only its sender's measures. */
 export const WIRE_ACK_SHARE = 0.0025
 export const WIRE_REFRESH_SHARE = 0.0075
-/** A data frame cut for room waits for this much of it, or what is left of the frame: smaller pieces spend a slow
- *  uplink on their headers. */
-export const WIRE_ROOM_PIECE_MIN_BYTES = 2 * 1024
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
  *  least (see `send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024

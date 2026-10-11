@@ -1823,7 +1823,7 @@ test("a page's burst of sends its server acknowledges slower than they come read
 async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Array, never>) => () => void, ms = 20_000) {
   const download = loop.open<never, Uint8Array>()
   const other = loop.open<never, number>()
-  const { page } = loop.open<Uint8Array, never>()
+  const { page, server: uploaded } = loop.open<Uint8Array, never>()
   download.page.listenBinary(() => {})
   const waits: number[] = []
   other.page.listen((sentAt) => void waits.push(Date.now() - sentAt))
@@ -1831,7 +1831,8 @@ async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Arra
   const socket = loop.socket
   socket.toServer.bytesPerMs = up
   socket.toPage.bytesPerMs = 20_000
-  const wire = { measuring: false, down: 0, up: 0 }
+  const wire = { measuring: false, down: 0, up: 0, payload: 0 }
+  uploaded.listenBinary((data) => void (wire.measuring && (wire.payload += data.byteLength)))
   const onmessage = socket.onmessage!
   socket.onmessage = (event) => {
     if (wire.measuring) wire.down += event.data.byteLength
@@ -1853,7 +1854,12 @@ async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Arra
   await run(ms)
   clearInterval(tick)
   stop()
-  return { down: wire.down / ms / 1_000, up: wire.up / ms, waits: waits.sort((a, b) => a - b) }
+  return {
+    down: wire.down / ms / 1_000,
+    up: wire.up / ms,
+    payload: wire.payload / ms,
+    waits: waits.sort((a, b) => a - b),
+  }
 }
 
 /** What the window's ends can cut off: a 64 KiB frame, in B/ms over the 20 s. */
@@ -1886,6 +1892,28 @@ test.each([
     expect(row.up).toBeGreaterThanOrEqual(Math.min(main.up, (burst * KIB) / every))
     expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
     expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
+  },
+)
+
+// Main's growth rule, run in this harness, crawls the download beside an upload that awaits each message on a slow uplink:
+// the wire's MB/s down and the upload's payload in B/ms. The page's acknowledgements and refreshes of the download take
+// up to 1% of the uplink (see `WIRE_ACK_SHARE`).
+test.each([
+  [10, 16, { down: 2.4154, payload: 9.8304 }],
+  [10, 64, { down: 2.7628, payload: 9.8304 }],
+  [25, 16, { down: 18.5685, payload: 22.9376 }],
+])(
+  "on a %i B/ms uplink with an upload that awaits each %i KiB message, a 20 MB/s download carries what it does on main's growth rule or more, the upload within 1% of its payload there, and another channel's messages wait 1.5 s at most",
+  async (up, message, main) => {
+    const row = await downloadBeside(up, (page) => {
+      void (async () => {
+        while (!page.isClosed) await page.sendBinary(new Uint8Array(message * KIB))
+      })().catch(() => {})
+      return () => {}
+    })
+    expect(row.down).toBeGreaterThanOrEqual(main.down)
+    expect(row.payload).toBeGreaterThanOrEqual(0.99 * main.payload)
+    expect(row.waits.at(-1)).toBeLessThanOrEqual(1_500)
   },
 )
 

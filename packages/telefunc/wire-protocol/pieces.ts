@@ -10,7 +10,6 @@ import {
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
-  WIRE_ROOM_PIECE_MIN_BYTES,
   WIRE_SEND_ACK_GAP_MS,
   WIRE_SEND_ACK_MIN_BYTES,
   WIRE_SEND_ACK_MS,
@@ -158,17 +157,12 @@ class PieceSender {
     this.transmit(frame)
   }
 
-  /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes once it takes
-   *  `WIRE_ROOM_PIECE_MIN_BYTES` or the rest, and holds the rest. */
+  /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes, and holds the rest. */
   private cut(frame: Uint8Array<ArrayBuffer>, offset: number): void {
     const bytes = frame.byteLength
     const now = performance.now()
     const room = Math.max(0, Math.floor(this.room.dataRoom()))
-    const end = !isSequencedTag(frame[0]!)
-      ? bytes
-      : room < Math.min(WIRE_ROOM_PIECE_MIN_BYTES, bytes - offset)
-        ? offset
-        : Math.min(bytes, offset + room)
+    const end = isSequencedTag(frame[0]!) ? Math.min(bytes, offset + room) : bytes
     if (end === offset) return this.hold(frame, offset)
     // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
     // two pieces at once. One cut only for room is no measure.
