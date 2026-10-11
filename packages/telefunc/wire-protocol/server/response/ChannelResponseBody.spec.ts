@@ -16,6 +16,7 @@ function createSender(frames: Uint8Array[]): PeerSender {
     },
     bufferedAmount: () => 0,
     deliveredBeforeFrame: () => 0,
+    sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
   }
 }
 

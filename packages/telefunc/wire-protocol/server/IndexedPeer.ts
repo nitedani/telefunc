@@ -4,11 +4,14 @@ export type { PeerSender }
 import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
 import type { AckResultStatus, ErrorReason } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
+import type { SendWait } from '../link.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
   bufferedAmount(): number | undefined
+  /** How long the frames that go at once wait behind what the wire holds. */
+  sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
   deliveredBeforeFrame(ms: number): number
 }

@@ -1938,6 +1938,25 @@ test("on a 1250 B/ms uplink with bursts of 2400 KiB every 2000 ms beside a 20 MB
   expect(idle).toBe(0)
 })
 
+// Each end's window covers its refreshes' wait behind what its own socket holds: the page's as its uplink model says, the
+// server's as its runtime's buffered amount says.
+test('when both ends send 64-byte messages as fast as credit allows, the upload carries what the download does, the server granting the page what the page grants it', async () => {
+  const { server, page } = loop.open<string, string>()
+  let up = 0
+  let down = 0
+  server.listen(() => void up++)
+  page.listen(() => void down++)
+  await run(100)
+  for (const end of [server, page])
+    void (async () => {
+      while (!end.isClosed) await end.send('x'.repeat(64))
+    })().catch(() => {})
+  await run(600)
+  const window = (end: unknown) => (end as { _flow: { byteWindow: number } })._flow.byteWindow
+  expect(up).toBeGreaterThanOrEqual(0.99 * down)
+  expect(window(server)).toBeGreaterThanOrEqual(window(page))
+})
+
 // What a page sends about what it receives shares its uplink with what it uploads.
 test("on a 10 B/ms uplink the page measured, a 20 MB/s download's acknowledgements and window refreshes take at most 1% of it, and the download keeps its rate", async () => {
   const download = loop.open<never, Uint8Array>()

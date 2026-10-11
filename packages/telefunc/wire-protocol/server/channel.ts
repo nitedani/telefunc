@@ -170,6 +170,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         bdpPing: (probe) => this._peer?.sendBdpPing(probe),
       },
       () => this._peer?.sender.bufferedAmount(),
+      Number.POSITIVE_INFINITY,
+      () => this._peer?.sender.sendWait() ?? null,
     )
     const c = getServerConfig().channel
     this._flow.fitReplays(

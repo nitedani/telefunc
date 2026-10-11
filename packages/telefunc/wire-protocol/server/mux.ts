@@ -47,6 +47,7 @@ import type {
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PieceReceiver, PieceSender } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
+import { SocketWait } from '../link.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -170,6 +171,8 @@ type ConnectionState = {
   /** Channels attaching to the wire in this turn, before its session holds them: what they send as they attach (their
    *  replay, what they buffered, what `onOpen` sends) counts under their flow control too. */
   attaching: Set<ServerChannel>
+  /** How long the frames that go at once wait behind what the socket holds. */
+  wait: SocketWait
 }
 
 type ConnectionEntry = {
@@ -269,6 +272,7 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
+    const wait = new SocketWait(() => this.bufferedAmount(connection))
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -296,11 +300,13 @@ class ChannelMux {
         largestSent: 0,
         pastSendBacklog: false,
         attaching: new Set(),
+        wait,
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         bufferedAmount: () => this.bufferedAmount(connection),
+        sendWait: () => wait,
         deliveredBeforeFrame: (ms) => {
           const state = this.connectionEntries.get(connection)?.state
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
@@ -1075,6 +1081,7 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
+    state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
     if (state.pieces) state.pieces.sender.send(frame, this.options.pingInterval)
     else entry.transport.sendNow(connection, frame)
   }

@@ -17,6 +17,7 @@ function createPeer(frames: Uint8Array[]) {
       },
       bufferedAmount: () => 0,
       deliveredBeforeFrame: () => 0,
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
     7,
     new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
