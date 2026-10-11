@@ -1835,7 +1835,7 @@ test.each([
       return () => clearInterval(timer)
     })
     expect(row.down).toBeGreaterThanOrEqual(0.9 * main.down)
-    expect(row.up).toBeGreaterThanOrEqual(Math.min(main.up, (burst * KIB) / every) - CUT_FRAME)
+    expect(row.up).toBeGreaterThanOrEqual(Math.min(main.up, (burst * KIB) / every))
     expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
     expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
   },

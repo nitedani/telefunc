@@ -11,6 +11,7 @@ import {
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
+  WIRE_ROOM_PIECE_MIN_BYTES,
   WIRE_SEND_ACK_GAP_MS,
 } from './constants.js'
 import { TAG, assertProtocol, encode, isSequencedTag } from './shared-ws.js'
@@ -153,13 +154,17 @@ class PieceSender {
     this.transmit(frame)
   }
 
-  /** Hands the socket `frame` from `offset` in pieces, of data as far as `dataRoom` goes, and holds the rest. */
+  /** Hands the socket `frame` from `offset` in pieces, of data as far as `dataRoom` goes once it takes
+   *  `WIRE_ROOM_PIECE_MIN_BYTES` or the rest, and holds the rest. */
   private cut(frame: Uint8Array<ArrayBuffer>, offset: number): void {
     const bytes = frame.byteLength
     const now = performance.now()
+    const room = Math.max(0, Math.floor(this.dataRoom()))
     const end =
       this.fastest > 0 && isSequencedTag(frame[0]!)
-        ? Math.min(bytes, offset + Math.max(0, Math.floor(this.dataRoom())))
+        ? room < Math.min(WIRE_ROOM_PIECE_MIN_BYTES, bytes - offset)
+          ? offset
+          : Math.min(bytes, offset + room)
         : bytes
     if (end === offset && this.fastest > 0) return this.hold(frame, offset)
     // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first

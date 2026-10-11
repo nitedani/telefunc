@@ -223,6 +223,9 @@ export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 export const WIRE_PIECES_ACK_GAP_MS = 50
 /** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
+/** A data frame cut for room waits for this much of it, or what is left of the frame: smaller pieces spend a slow
+ *  uplink on their headers. */
+export const WIRE_ROOM_PIECE_MIN_BYTES = 2 * 1024
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
  *  least (see `send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
