@@ -486,11 +486,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._onPeerCloseAck()
         return
       case TAG.ABORT:
-        this._shutdown(createAbortError(parsePeerText(frame.abortValue)))
+        this._shutdown(createAbortError(parsePeerText(frame.abortValue)), { pageGone: true })
         return
       case TAG.ERROR:
         assertProtocol(frame.reason === ERROR_REASON.LOST, `ERROR reason ${frame.reason} from a page`)
-        this._shutdown(replayLossError('client'))
+        this._shutdown(replayLossError('client'), { pageGone: true })
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
