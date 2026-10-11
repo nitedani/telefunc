@@ -119,6 +119,8 @@ class SendBudget {
     if (this.spanMs >= DRAIN_SPAN_MS) this.drained()
     let newest: { end: number; bytes: number; ahead: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
+    // What the server acknowledged left the uplink, though the rate it took data at so far says it could still be there.
+    this.queued = Math.min(this.inUplink(), this.sender.transmittedBytes - acknowledged)
     if (newest !== undefined) this.measure(newest, newly, spanUs)
     this.sendHeld()
     this.pace()

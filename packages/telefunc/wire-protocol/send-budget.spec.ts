@@ -101,3 +101,15 @@ test('a wait that stays over the target with the least allowance is the path hav
   for (let i = 0; i < 20; i++) allowance = exchange(32_000, 10)
   expect(allowance).toBeGreaterThan(2 * WIRE_SEND_AHEAD_MIN_BYTES)
 })
+
+// A rate measured while the page sent little lags one it sends more at: the data acknowledged is out of the uplink anyway.
+test('a frame that goes at once waits behind none of the data the server acknowledged, however slow the rate measured so far', async () => {
+  const { budget, clock, exchange } = await open()
+  // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
+  for (let i = 0; i < 2; i++) exchange(10_000, 100)
+  budget.send(data(50_000), 5_000)
+  expect(budget.startRound()).toBeGreaterThan(0)
+  clock.now += 10
+  expect(budget.acknowledged(PROBE + 70_000, 0, 10_000)).toBe(true)
+  expect(budget.startRound()).toBe(0)
+})
