@@ -28,8 +28,8 @@ const DRAIN_RATES = 8
  *  The room is the allowance less what the uplink holds, or less what the server hasn't acknowledged where that is more,
  *  but for what late acknowledgements hide and what the server takes before it acknowledges. What the uplink holds is the
  *  data handed to the socket, drained at the rate the server takes it. While the room is used up and the uplink holds
- *  data, a timer looks again as it drains. The frames that go at once wait behind what it holds: a page's download
- *  window covers that wait (see `SendWait`).
+ *  data, a timer looks again as it drains. The frames that go at once wait behind what it holds: while the uplink sets
+ *  the pace, a page's download window covers that wait (see `SendWait`).
  *
  *  The allowance is what keeps data from waiting long in those queues. A PIECES_ACK says when the newest data it covers
  *  arrived, only as the µs after the data the ack before covered, so the clocks of the two ends need not agree: data's
@@ -65,6 +65,11 @@ class SendBudget {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   /** The longest a frame that went at once waited since the round started (see `SendWait`). */
   private longestWait = 0
+  /** The room ran out while the uplink held data, since it last held none, and so since the round started: the uplink
+   *  sets the pace. Where the page sends less than the link takes, the rate measured is the page's, and what it says the
+   *  uplink holds isn't there. */
+  private limited = false
+  private limitedInRound = false
   /** Called when the timer finds the uplink drained some of what it held. */
   onRoom: () => void = () => {}
 
@@ -80,15 +85,16 @@ class SendBudget {
     else this.longestWait = Math.max(this.longestWait, this.uplinkWait())
   }
 
-  /** `SendWait`: a round starts. */
+  /** `SendWait`: a round starts. Taken off a round trip, a wait it overstates only makes the path's seem shorter. */
   startRound(): number {
     this.longestWait = 0
+    this.limitedInRound = this.limited
     return this.uplinkWait()
   }
 
-  /** `SendWait`: the round ends. */
+  /** `SendWait`: the round ends. Added to the loop the window covers, it counts only where the uplink set the pace. */
   endRound(): number {
-    return Math.max(this.longestWait, this.uplinkWait())
+    return this.limitedInRound ? Math.max(this.longestWait, this.uplinkWait()) : 0
   }
 
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
@@ -136,10 +142,12 @@ class SendBudget {
     return this.allowance - Math.max(waiting, unarrived)
   }
 
-  /** While the room is used up and the uplink holds data, data may wait for room: looks again once the uplink carried
-   *  what its server acknowledges at once, or all it holds. */
+  /** While the room is used up and the uplink holds data, the uplink sets the pace, and data may wait for room: looks
+   *  again once the uplink carried what its server acknowledges at once, or all it holds. */
   private pace(): void {
-    if (this.paceTimer !== null || this.drainRate === 0 || this.room > 0 || this.queued === 0) return
+    if (this.drainRate === 0 || this.room > 0 || this.queued === 0) return
+    this.limited = this.limitedInRound = true
+    if (this.paceTimer !== null) return
     this.paceTimer = unrefTimer(
       setTimeout(
         () => {
@@ -161,6 +169,7 @@ class SendBudget {
   private inUplink(): number {
     const now = performance.now()
     this.queued = Math.max(0, this.queued - this.drainRate * (now - this.queuedAt))
+    if (this.queued === 0) this.limited = false
     this.queuedAt = now
     return this.queued
   }

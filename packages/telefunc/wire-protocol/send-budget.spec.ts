@@ -113,3 +113,22 @@ test('a frame that goes at once waits behind none of the data the server acknowl
   expect(budget.acknowledged(PROBE + 70_000, 0, 10_000)).toBe(true)
   expect(budget.startRound()).toBe(0)
 })
+
+// The rate the server took data at is the page's where it sends less than the link takes: a round in which its room never
+// ran out counts no wait of its own.
+test('a round counts what the frames that go at once waited only where the room ran out while the uplink held data', async () => {
+  const { budget, clock, exchange } = await open()
+  // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
+  for (let i = 0; i < 2; i++) exchange(10_000, 100)
+  budget.startRound()
+  budget.send(data(20_000), 5_000)
+  budget.send(flowControl(100), 5_000)
+  expect(budget.endRound()).toBe(0)
+  clock.now += 10
+  expect(budget.acknowledged(PROBE + 40_100, 0, 10_000)).toBe(true)
+  budget.startRound()
+  budget.send(data(200_000), 5_000)
+  expect(budget.room).toBeLessThanOrEqual(0)
+  budget.send(flowControl(100), 5_000)
+  expect(budget.endRound()).toBeGreaterThan(0)
+})
