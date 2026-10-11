@@ -416,7 +416,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt, this._connection.quietBeforeLast())
+        this._flow.onPingAck(frame.probe, frame.backlog, frame.pathRtt, (ms) =>
+          this._connection.deliveredBeforeLast(ms),
+        )
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }

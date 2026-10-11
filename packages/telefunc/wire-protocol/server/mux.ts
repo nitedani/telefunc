@@ -46,6 +46,7 @@ import type {
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PieceReceiver, PieceSender } from '../pieces.js'
+import { Deliveries } from '../deliveries.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -146,8 +147,10 @@ type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
-  /** How long the wire had delivered nothing when the frame it's handling arrived. */
-  quietBeforeFrame: number
+  /** Each frame, piece and announcement the wire delivered. */
+  deliveries: Deliveries
+  /** The number of the delivery that completed the frame it's handling. */
+  frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
   pieces: { sender: PieceSender; receiver: PieceReceiver } | null
@@ -272,7 +275,8 @@ class ChannelMux {
       state: {
         pingTimer: null,
         lastReceivedAt: 0,
-        quietBeforeFrame: 0,
+        deliveries: new Deliveries(),
+        frameDelivery: 0,
         pongedAt: performance.now(),
         pieces: transport.wholeMessages
           ? {
@@ -299,7 +303,10 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         bufferedAmount: () => this.bufferedAmount(connection),
-        quietBeforeFrame: () => this.connectionEntries.get(connection)?.state.quietBeforeFrame ?? 0,
+        deliveredBeforeFrame: (ms) => {
+          const state = this.connectionEntries.get(connection)?.state
+          return state ? state.deliveries.before(state.frameDelivery, ms) : 0
+        },
       },
     })
     const connId = transport.getConnId(connection)
@@ -424,14 +431,17 @@ class ChannelMux {
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
     if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, connection, rawFrame)
     const now = performance.now()
-    if (!pieced) state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
+    if (!pieced) {
+      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
+      state.deliveries.note(now, byteLength)
+    }
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
     // Taken as it arrives: it's handled once those before it were, after later ones arrived.
-    const quietBefore = now - state.lastReceivedAt
+    const delivery = state.deliveries.last
     state.lastReceivedAt = now
     const exec = (): Promise<ReconcileOutcome | null> =>
-      this.runInboundTurn(entry, connection, rawFrame, byteLength, quietBefore)
+      this.runInboundTurn(entry, connection, rawFrame, byteLength, delivery)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
     this.answerArrival(entry, connection)
     return this.chainRecv(entry, exec)
@@ -446,6 +456,7 @@ class ChannelMux {
     // Each piece answered: the page's PINGs wait behind the rest of its frame.
     const now = performance.now()
     entry.state.lastReceivedAt = now
+    entry.state.deliveries.note(now, rawFrame.byteLength)
     this.pong(entry, connection, [])
     const { state } = entry
     let frame: Uint8Array<ArrayBuffer> | null
@@ -478,6 +489,7 @@ class ChannelMux {
   ): Promise<ReconcileOutcome | null> {
     const now = performance.now()
     entry.state.lastReceivedAt = now
+    entry.state.deliveries.note(now, rawFrame.byteLength)
     try {
       const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
       assert(announce.tag === TAG.ANNOUNCE)
@@ -530,10 +542,10 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
     byteLength: number,
-    quietBefore: number,
+    delivery: number,
   ): Promise<ReconcileOutcome | null> {
     try {
-      entry.state.quietBeforeFrame = quietBefore
+      entry.state.frameDelivery = delivery
       return (await this.handleFrame(entry, connection, rawFrame)) ?? null
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
@@ -849,8 +861,8 @@ class ChannelMux {
     replay: boolean,
   ): ChannelHandle | null {
     // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
-    // path's. It measures, so it says nothing starved, and names no round trip.
-    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false, Infinity))
+    // path's. It measures, so it says no credit ran out, and names no round trip.
+    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, Infinity, Infinity))
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry

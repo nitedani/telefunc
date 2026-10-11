@@ -40,6 +40,7 @@ import {
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { PieceReceiver, PieceSender } from '../pieces.js'
+import { Deliveries } from '../deliveries.js'
 import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { replayWindow } from '../flow-control/flow-control.js'
@@ -108,8 +109,7 @@ class Heartbeat {
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
   private lastReceivedAt = 0
-  /** How long the wire had delivered nothing when it last delivered. */
-  private quietBeforeLast = 0
+  private readonly deliveries = new Deliveries()
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
   private expectedBy = () => 0
 
@@ -133,14 +133,14 @@ class Heartbeat {
     this.armPongDeadline(this.pongTimeoutMs)
   }
 
-  noteReceived(at = performance.now()): void {
-    this.quietBeforeLast = at - this.lastReceivedAt
+  noteReceived(bytes: number, at = performance.now()): void {
+    this.deliveries.note(at, bytes)
     this.lastReceivedAt = at
   }
 
-  /** How long the wire had delivered nothing when it last delivered. */
-  quietBefore(): number {
-    return this.quietBeforeLast
+  /** The bytes the wire delivered in the `ms` before it last delivered. */
+  deliveredBefore(ms: number): number {
+    return this.deliveries.before(this.deliveries.last, ms)
   }
 
   expectFrom(expectedBy: () => number): void {
@@ -245,11 +245,11 @@ interface MuxConnection {
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
-  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void
+  sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
-  /** How long the wire had delivered nothing when it last delivered: when a frame handled as it arrives did. */
-  quietBeforeLast(): number
+  /** The bytes the wire delivered in the `ms` before it last delivered: before a frame handled as it arrives. */
+  deliveredBeforeLast(ms: number): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -309,8 +309,8 @@ type ClientChannelTransport = {
   hasHeartbeat(): boolean
   /** How long its wire has delivered nothing, as its heartbeat tracks it: `Infinity` without one. */
   quietFor(): number
-  /** How long its wire had delivered nothing when it last delivered, as its heartbeat tracks it: 0 without one. */
-  quietBeforeLast(): number
+  /** The bytes its wire delivered in the `ms` before it last delivered, as its heartbeat tracks it: 0 without one. */
+  deliveredBeforeLast(ms: number): number
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>
   dispose(): void
@@ -855,18 +855,18 @@ class ClientConnection implements MuxConnection {
     this.sendFlowControl(ix, encode.bdpPing(ix, probe))
   }
 
-  sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void {
+  sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, starved, pathRtt))
+    this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, backlog, pathRtt))
   }
 
   bufferedAmount(): number {
     return this.transport.bufferedAmount() + this.heldForRoomBytes
   }
 
-  quietBeforeLast(): number {
-    return this.transport.quietBeforeLast()
+  deliveredBeforeLast(ms: number): number {
+    return this.transport.deliveredBeforeLast(ms)
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -2047,8 +2047,8 @@ class WsTransport implements UpgradeTarget {
     return this.heartbeat?.quietFor() ?? Infinity
   }
 
-  quietBeforeLast(): number {
-    return this.heartbeat?.quietBefore() ?? 0
+  deliveredBeforeLast(ms: number): number {
+    return this.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   drained(): Promise<void> {
@@ -2081,7 +2081,7 @@ class WsTransport implements UpgradeTarget {
     this.budget = budget
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
-      this.heartbeat?.noteReceived(now)
+      this.heartbeat?.noteReceived((data as ArrayBuffer).byteLength, now)
       const message = receiveMessage(ws, pieces, data, now)
       if (message === null) return
       const { frame } = message
@@ -2448,7 +2448,7 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
-      () => this.heartbeat?.noteReceived(),
+      (bytes) => this.heartbeat?.noteReceived(bytes),
     )
 
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
@@ -2761,8 +2761,8 @@ class SseTransport implements UpgradeSource {
     return this.heartbeat?.quietFor() ?? Infinity
   }
 
-  quietBeforeLast(): number {
-    return this.heartbeat?.quietBefore() ?? 0
+  deliveredBeforeLast(ms: number): number {
+    return this.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   drained(): Promise<void> {
@@ -2860,7 +2860,7 @@ function isWindowRefresh({ frame }: OutboxEntry): boolean {
 function createSseEventStreamReader(
   reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
   abortController: AbortController,
-  onChunk: () => void,
+  onChunk: (bytes: number) => void,
 ): {
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
@@ -2913,7 +2913,7 @@ function createSseEventStreamReader(
         if (abortController.signal.aborted || cancelled) return null
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
-      onChunk()
+      onChunk(value!.byteLength)
       lines.push(value!, onLine)
     }
   }

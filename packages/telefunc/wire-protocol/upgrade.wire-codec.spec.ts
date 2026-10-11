@@ -74,29 +74,31 @@ describe('upgrade wire vocabulary', () => {
     expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
   })
 
-  test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, whether the window starved its sender, and the path's round trip it measured", () => {
+  test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, the least its sender's wire held as its credit ran out, and the path's round trip it measured", () => {
     expect(decode(encode.bdpPing(3, 0xffff_ffff))).toEqual({
       tag: TAG.BDP_PING,
       index: 3,
       probe: 0xffff_ffff,
     })
-    expect(decode(encode.bdpPingAck(3, 7, true, 42.5))).toEqual({
+    expect(decode(encode.bdpPingAck(3, 7, 65_536, 42.5))).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
-      starved: true,
+      backlog: 65_536,
       pathRtt: 42.5,
     })
-    // Where it measured none.
-    expect(decode(encode.bdpPingAck(3, 7, false, Infinity))).toEqual({
+    // Where the credit didn't run out, and it measured none.
+    expect(decode(encode.bdpPingAck(3, 7, Infinity, Infinity))).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
-      starved: false,
+      backlog: Infinity,
       pathRtt: Infinity,
     })
+    // A wire that held 4 GiB or more held more than any window.
+    expect(decode(encode.bdpPingAck(3, 7, 2 ** 33, 1))).toMatchObject({ backlog: Infinity })
     // Under a microsecond, as on loopback, it still says it measured one.
-    expect(decode(encode.bdpPingAck(3, 7, false, 0.0001))).toMatchObject({ pathRtt: 0.001 })
+    expect(decode(encode.bdpPingAck(3, 7, 0, 0.0001))).toMatchObject({ pathRtt: 0.001 })
   })
 
   test('WINDOW round-trips its limit and the last seq its receiver has', () => {
@@ -298,7 +300,7 @@ describe('decodeClientFrame — direction', () => {
     ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
-    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true, 50)],
+    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, 0, 50)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],
     ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
   ]

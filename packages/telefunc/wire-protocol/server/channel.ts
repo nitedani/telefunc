@@ -502,7 +502,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._peer?.sendBdpPingAck(frame.probe, this._flow.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt, this._peer?.sender.quietBeforeFrame() ?? 0)
+        this._flow.onPingAck(
+          frame.probe,
+          frame.backlog,
+          frame.pathRtt,
+          (ms) => this._peer?.sender.deliveredBeforeFrame(ms) ?? 0,
+        )
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:

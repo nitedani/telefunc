@@ -290,10 +290,10 @@ test("an attach's probe is answered as the RECONCILE naming it is read, for a ch
   )
   const acks = sent
     .get(wire)!
-    .flatMap((frame) => (frame.tag === TAG.BDP_PING_ACK ? [[frame.index, frame.probe, frame.starved]] : []))
+    .flatMap((frame) => (frame.tag === TAG.BDP_PING_ACK ? [[frame.index, frame.probe, frame.backlog]] : []))
   expect(acks).toEqual([
-    [0, 7, false],
-    [1, 8, false],
+    [0, 7, Infinity],
+    [1, 8, Infinity],
   ])
   mux.registerChannel(new ServerChannel({ id: 'late' }))
 })

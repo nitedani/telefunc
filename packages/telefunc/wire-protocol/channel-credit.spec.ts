@@ -890,6 +890,42 @@ test("a download whose path's round trip rises on its wire grows its window to c
   expect(loop.sockets).toHaveLength(1)
 })
 
+// What the other channels' messages leave in the server's socket, and deliver just before the ping's ack, is no queue.
+test.each([
+  ['another channel on it gets a small message every 50 ms', [50]],
+  ['another channel on it gets a small message every 250 ms', [250]],
+  ['two other channels on it each get a small message every 50 ms, 25 ms apart', [50, 50]],
+])(
+  "a download whose path's round trip rises on its wire grows its window as far as alone to carry the link's rate while %s",
+  async (_, ticks) => {
+    const feed = loop.open<never, Uint8Array>()
+    const chats = ticks.map(() => loop.open<never, number>())
+    for (const { page } of chats) page.listen(() => {})
+    let got = 0
+    feed.page.listenBinary((data) => void (got += data.byteLength))
+    await run(1_000)
+    loop.socket.toPage.bytesPerMs = 20_000
+    void (async () => {
+      while (!feed.server.isClosed) await feed.server.sendBinary(new Uint8Array(64 * KIB))
+    })()
+    const tickers: ReturnType<typeof setInterval>[] = []
+    for (const [i, { server }] of chats.entries()) {
+      if (i > 0) await run(ticks[i]! / chats.length)
+      tickers.push(setInterval(() => void server.send(Date.now()).catch(() => {}), ticks[i]))
+    }
+    await run(3_000)
+    for (const pipe of [loop.socket.toPage, loop.socket.toServer]) pipe.latencyMs = 100
+    await run(5_000)
+    const before = got
+    await run(5_000)
+    for (const ticker of tickers) clearInterval(ticker)
+    expect((got - before) / 5_000).toBeGreaterThan(0.9 * 20_000)
+    // As far as the spec above, alone on its wire.
+    expect(flowOf(feed.page).byteWindow).toBe(8 * 1024 * KIB)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
+
 // The page's socket here reports nothing it holds, as a browser's does of what its network stack and kernel hold: a
 // WebSocket's bufferedAmount reads 0 in Chromium while more than a megabyte of the upload waits below it.
 test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's socket reports it holds", async () => {

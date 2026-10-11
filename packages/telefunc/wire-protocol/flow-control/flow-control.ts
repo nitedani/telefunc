@@ -93,9 +93,9 @@ class FlowControl {
   /** Bytes sent since this side's sender last yielded or waited. */
   private _unyieldedBytes = 0
   private _shutdown = false
-  /** Since this side last answered a `BDP_PING`: whether its credit ran out, as more came or as the ping did, while its
-   *  wire held nothing. */
-  private _starved = false
+  /** Since this side last answered a `BDP_PING`: the least its wire held whenever its credit ran out, as more came or as
+   *  the ping did, 0 where the runtime can't tell, `Infinity` while it didn't. */
+  private _leastBacklog = Infinity
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.
   private _prevBucket = 0
@@ -185,7 +185,7 @@ class FlowControl {
   onPeerByteWindow(limit: number): void {
     const raise = (limit - this._limitBytes) | 0
     if (raise <= 0) return
-    this._noteStarved()
+    this._noteBacklog()
     this._limitBytes += raise
     this._limitRaised = true
     this._tryWakeCreditWaiters()
@@ -194,26 +194,27 @@ class FlowControl {
   onPeerMessageWindow(limit: number): void {
     const raise = (limit - this._limitMessages) | 0
     if (raise <= 0) return
-    this._noteStarved()
+    this._noteBacklog()
     this._limitMessages += raise
     this._tryWakeCreditWaiters()
   }
 
-  /** Sender-side: answer a `BDP_PING`. Returns whether, since the last one, the window starved the wire: its credit ran
-   *  out, as more came or as the ping did, while the wire held nothing, or what the runtime can't tell. A wire that
-   *  held a backlog each time was busy, and a larger window would only have queued more on it. */
-  onPing(): boolean {
-    this._noteStarved()
-    const starved = this._starved
-    this._starved = false
-    return starved
+  /** Sender-side: answer a `BDP_PING`. Returns the least the wire held whenever, since the last one, its credit ran out,
+   *  as more came or as the ping did: 0 where the runtime can't tell, `Infinity` where it didn't run out. The receiver
+   *  takes a wire that held an eighth of its window or more each time for busy, where a larger window would only have
+   *  queued more. */
+  onPing(): number {
+    this._noteBacklog()
+    const backlog = this._leastBacklog
+    this._leastBacklog = Infinity
+    return backlog
   }
 
   /** Receiver-side: account one received frame off the wire. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
   onReceived(bytes: number): void {
     this._arrived = true
-    if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._backlog)) this._emit.bdpPing(this._bdp.probe)
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
@@ -243,12 +244,13 @@ class FlowControl {
     if (this._arrived) this._advertiseBytes()
   }
 
-  /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire, and the path's round trip as the peer
-   *  measured it, and which arrived after the wire had delivered nothing for `quietMs`. Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out
-   *  the peer's queue (see `BdpEstimator`), AND our own self-utilisation is below threshold.
-   *  On growth, the new limit goes out to the peer immediately. */
-  onPingAck(probe: number, starved: boolean, peerPathRtt: number, quietMs: number): void {
-    const suggest = this._bdp.onPingAck(probe, starved, peerPathRtt, quietMs)
+  /** Settle `BDP_PING_ACK`, which says the least the peer's wire held whenever its credit ran out, and the path's round
+   *  trip as the peer measured it. `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived.
+   *  Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's
+   *  queue (see `BdpEstimator`), AND our own self-utilisation is below threshold. On growth, the new limit goes out to
+   *  the peer immediately. */
+  onPingAck(probe: number, peerBacklog: number, peerPathRtt: number, deliveredBefore: (ms: number) => number): void {
+    const suggest = this._bdp.onPingAck(probe, peerBacklog, peerPathRtt, deliveredBefore)
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
@@ -376,10 +378,9 @@ class FlowControl {
     this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
   }
 
-  private _noteStarved(): void {
-    if (this._starved || !this._isOutOfCredit()) return
-    const backlog = this._backlog()
-    this._starved = backlog === undefined || backlog === 0
+  private _noteBacklog(): void {
+    if (this._leastBacklog === 0 || !this._isOutOfCredit()) return
+    this._leastBacklog = Math.min(this._leastBacklog, this._backlog() ?? 0)
   }
 
   private _isOutOfCredit(): boolean {

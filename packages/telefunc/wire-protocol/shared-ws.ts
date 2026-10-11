@@ -156,8 +156,9 @@ const TAG = {
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
    *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
-  /** Payload: u32, the probe it answers, u8 1 when the sender's credit ran out while its wire held nothing, since it last
-   *  sent one, and u32, the path's round trip in µs as the sender measured it, 0 where it measured none. */
+  /** Payload: u32, the probe it answers, u32, the least bytes the sender's wire held whenever its credit ran out since it
+   *  last sent one, all ones past that or where it didn't run out, and u32, the path's round trip in µs as the sender
+   *  measured it, 0 where it measured none. */
   BDP_PING_ACK: 0x38 as const,
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
@@ -340,8 +341,9 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
   | { tag: typeof TAG.BDP_PING; index: number; probe: number }
-  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
-  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; starved: boolean; pathRtt: number }
+  /** `backlog` in bytes, `Infinity` where the credit didn't run out; `pathRtt` in ms, `Infinity` where the sender measured
+   *  none. */
+  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; backlog: number; pathRtt: number }
   /** `lastSeq` is null when the channel wasn't attached. */
   | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
@@ -591,15 +593,16 @@ const encode = {
     writeU32(frame, HEADER, probe)
     return frame
   },
-  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
-  bdpPingAck(index: number, probe: number, starved: boolean, pathRtt: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 9)
+  /** `backlog` in bytes, `Infinity` where the credit didn't run out; `pathRtt` in ms, `Infinity` where the sender measured
+   *  none. */
+  bdpPingAck(index: number, probe: number, backlog: number, pathRtt: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 12)
     writeHeader(frame, TAG.BDP_PING_ACK, index, 0)
     writeU32(frame, HEADER, probe)
-    frame[HEADER + 4] = starved ? 1 : 0
+    writeU32(frame, HEADER + 4, Math.min(0xffffffff, backlog))
     writeU32(
       frame,
-      HEADER + 5,
+      HEADER + 8,
       pathRtt === Infinity ? 0 : Math.min(0xffffffff, Math.max(1, Math.round(pathRtt * 1000))),
     )
     return frame
@@ -777,13 +780,14 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'BDP_PING payload too short')
       return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) }
     case TAG.BDP_PING_ACK: {
-      assertProtocol(payload.length >= 9, 'BDP_PING_ACK payload too short')
-      const pathRtt = readU32(payload, 5)
+      assertProtocol(payload.length >= 12, 'BDP_PING_ACK payload too short')
+      const backlog = readU32(payload, 4)
+      const pathRtt = readU32(payload, 8)
       return {
         tag: TAG.BDP_PING_ACK,
         index,
         probe: readU32(payload, 0),
-        starved: payload[4] === 1,
+        backlog: backlog === 0xffffffff ? Infinity : backlog,
         pathRtt: pathRtt === 0 ? Infinity : pathRtt / 1000,
       }
     }

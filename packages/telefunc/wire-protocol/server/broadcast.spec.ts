@@ -169,7 +169,7 @@ describe('keyed in-process broadcast', () => {
     const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
     broadcast._attachPeer(
       new IndexedPeer(
-        { send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0, quietBeforeFrame: () => 0 },
+        { send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0, deliveredBeforeFrame: () => 0 },
         7,
         replay,
       ),
@@ -202,7 +202,7 @@ describe('keyed in-process broadcast', () => {
             frames.push(frame)
           },
           bufferedAmount: () => 0,
-          quietBeforeFrame: () => 0,
+          deliveredBeforeFrame: () => 0,
         },
         7,
         new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
@@ -232,7 +232,7 @@ describe('keyed in-process broadcast', () => {
               frames.push(frame)
             },
             bufferedAmount: () => 0,
-            quietBeforeFrame: () => 0,
+            deliveredBeforeFrame: () => 0,
           },
           7,
           new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
@@ -360,7 +360,7 @@ describe('Broadcast shield validation', () => {
             frames.push(frame)
           },
           bufferedAmount: () => 0,
-          quietBeforeFrame: () => 0,
+          deliveredBeforeFrame: () => 0,
         },
         7,
         new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
@@ -391,7 +391,7 @@ describe('Broadcast shield validation', () => {
 
     sender._attachPeer(
       new IndexedPeer(
-        { send: () => {}, bufferedAmount: () => 0, quietBeforeFrame: () => 0 },
+        { send: () => {}, bufferedAmount: () => 0, deliveredBeforeFrame: () => 0 },
         7,
         new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
       ),

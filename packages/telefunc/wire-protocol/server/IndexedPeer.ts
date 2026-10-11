@@ -9,8 +9,8 @@ interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
   bufferedAmount(): number | undefined
-  /** How long the wire had delivered nothing when the frame it's handling arrived. */
-  quietBeforeFrame(): number
+  /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
+  deliveredBeforeFrame(ms: number): number
 }
 
 /** Wraps a `PeerSender`, encodes frames with a fixed channel index.
@@ -95,8 +95,8 @@ class IndexedPeer {
     this.sendCtrl(encode.bdpPing(this.index, probe))
   }
 
-  sendBdpPingAck(probe: number, starved: boolean, pathRtt: number): void {
-    this.sendCtrl(encode.bdpPingAck(this.index, probe, starved, pathRtt))
+  sendBdpPingAck(probe: number, backlog: number, pathRtt: number): void {
+    this.sendCtrl(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
   /** Returns the frame's payload byte count. */
