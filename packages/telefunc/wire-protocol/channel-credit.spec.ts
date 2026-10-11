@@ -1597,7 +1597,7 @@ test.each([
   ['naming a floor of 1 B/s', 1, []],
   ['then sending 1 B pieces further and further apart', 0, [10, 150_000]],
 ])(
-  'a peer that announces bytes it never sends, %s, has its wire cut once it was quiet twice the time 8 KiB takes at 64 B per ping deadline, the timer always within what setTimeout takes',
+  'a peer that opens an announcement it sends nothing more behind, %s, has its wire cut once it was quiet twice the time 8 KiB takes at 64 B per ping deadline, the timer always within what setTimeout takes',
   async (_, floorPerS, gaps) => {
     config.channel.pingInterval = 1_000
     const delays: number[] = []
@@ -1609,7 +1609,7 @@ test.each([
     // A raw WebSocket to the server, no page behind it.
     const socket = new LoopbackSocket('ws://hostile')
     await run(10)
-    socket.send(encode.announce(0xffffffff, floorPerS))
+    socket.send(encode.announce(0, floorPerS))
     for (const gap of gaps) {
       await run(gap)
       socket.send(encode.piece(1_000, new Uint8Array(1)))
@@ -1627,10 +1627,10 @@ test.each([
   },
 )
 
-test('a peer that announces more before what it announced arrived has its wire cut', async () => {
+test('a peer that closes an announcement with other bytes than followed it has its wire cut', async () => {
   const socket = new LoopbackSocket('ws://hostile')
   await run(10)
-  socket.send(encode.announce(100, 0))
+  socket.send(encode.announce(0, 0))
   socket.send(encode.piece(100, new Uint8Array(50)))
   socket.send(encode.announce(100, 0))
   await run(100)
