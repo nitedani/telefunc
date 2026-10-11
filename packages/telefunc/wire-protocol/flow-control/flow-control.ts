@@ -77,6 +77,9 @@ class FlowControl {
   private _consumedMessages = 0
   private _advertisedBytes = 0
   private _advertisedMessages = 0
+  /** The byte limit this side granted, and the bytes that arrived against it. */
+  private _grantedBytes: number = CREDIT_WINDOW_INITIAL_BYTES
+  private _receivedBytes = 0
   /** What had been consumed when the last urgent limit was emitted. */
   private _urgentBytes = 0
   private _urgentMessages = 0
@@ -217,6 +220,8 @@ class FlowControl {
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
   onReceived(bytes: number): void {
     this._arrived = true
+    this._receivedBytes += bytes
+    this._link?.creditArrived(bytes)
     if (this._bdp.onReceive(bytes, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
@@ -307,8 +312,11 @@ class FlowControl {
 
   /** Attach on `link`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
   attach(link: Link): void {
-    if (link !== this._link) this.reattach()
-    this._link = link
+    if (link !== this._link) {
+      this._link = link
+      link.granted(this._grantedBytes - this._receivedBytes)
+      this.reattach()
+    }
     this._bdp.attach(link)
   }
 
@@ -367,6 +375,11 @@ class FlowControl {
   private _advertiseBytes(): void {
     if (!this._fitted) return
     this._advertisedBytes = this._consumedBytes
+    const limit = this._consumedBytes + this.byteWindow
+    if (limit > this._grantedBytes) {
+      this._link?.granted(limit - this._grantedBytes)
+      this._grantedBytes = limit
+    }
     this._uncountedBytes = 0
     this._arrived = false
     const urgent = (this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow

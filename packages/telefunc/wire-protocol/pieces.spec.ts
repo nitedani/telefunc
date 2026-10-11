@@ -155,28 +155,26 @@ test('an acknowledgement is read modulo 2^32', async () => {
   }
 })
 
-test('a receiver whose peer holds data back acknowledges frames of any size once more than 16 KiB of them are unacknowledged, with the span between arrivals', () => {
+test('a receiver whose peer holds data back acknowledges data within 25 ms once 2 KiB of it are unacknowledged, and frames of any size at once once more than 16 KiB are, with the span between arrivals', () => {
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
+  const acks = () => sent.map((frame) => decode(frame))
   const receiver = new PieceReceiver((frame) => void sent.push(frame), { peerHoldsBack: true })
-  receiver.arrived(8_000, true, Date.now())
-  receiver.arrived(8_000, true, Date.now())
-  expect(sent).toHaveLength(0)
-  vi.advanceTimersByTime(20)
   receiver.arrived(1_000, true, Date.now())
-  expect(sent.map((frame) => decode(frame))).toEqual([{ tag: TAG.PIECES_ACK, bytes: 17_000, heldMs: 0, spanUs: 0 }])
-  // 100 ms on, 10 KB arrive, and 30 ms later 10 KB more: the second ack covers both.
   vi.advanceTimersByTime(100)
-  receiver.arrived(10_000, true, Date.now())
-  vi.advanceTimersByTime(30)
-  receiver.arrived(10_000, true, Date.now())
-  expect(sent.map((frame) => decode(frame))[1]).toEqual({
-    tag: TAG.PIECES_ACK,
-    bytes: 37_000,
-    heldMs: 0,
-    spanUs: 130_000,
-  })
+  expect(sent).toHaveLength(0)
+  receiver.arrived(1_500, true, Date.now())
+  vi.advanceTimersByTime(24)
+  expect(sent).toHaveLength(0)
+  vi.advanceTimersByTime(1)
+  expect(acks()).toEqual([{ tag: TAG.PIECES_ACK, bytes: 2_500, heldMs: 25, spanUs: 0 }])
+  // 100 ms on, 8 KB twice and 1 KB: past 16 KiB, at once, 125 ms after the data the first ack covered.
+  vi.advanceTimersByTime(100)
+  receiver.arrived(8_000, true, Date.now())
+  receiver.arrived(8_000, true, Date.now())
+  receiver.arrived(1_000, true, Date.now())
+  expect(acks()[1]).toEqual({ tag: TAG.PIECES_ACK, bytes: 19_500, heldMs: 0, spanUs: 125_000 })
   vi.useRealTimers()
 })
 

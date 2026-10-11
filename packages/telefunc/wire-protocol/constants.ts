@@ -221,6 +221,12 @@ export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 export const WIRE_PIECES_ACK_GAP_MS = 50
 /** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
+/** Where its peer holds data back, a receiver acknowledges data at most this long after it arrived, once
+ *  `WIRE_SEND_ACK_MIN_BYTES` are unacknowledged: on a slow uplink its peer learns the rate data arrives at from a few
+ *  KiB, not 16. */
+export const WIRE_SEND_ACK_MS = 25
+/** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
+export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 /** A data frame cut for room waits for this much of it, or what is left of the frame: smaller pieces spend a slow
  *  uplink on their headers. */
 export const WIRE_ROOM_PIECE_MIN_BYTES = 2 * 1024

@@ -2,6 +2,7 @@ export { Link }
 export type { SendWait }
 
 import { WIRE_PIECE_RATE_WINDOW_MS } from './constants.js'
+import { Fifo } from '../utils/Fifo.js'
 
 /** The least span of arrivals a rate the peer took data at is measured over: a frame arrives whole, so a shorter span
  *  can count one that took longer. */
@@ -21,8 +22,8 @@ type SendWait = {
 
 /** One wire, as this side knows it, and every channel on it reads the same: the path's round trip, which an attach's
  *  probe measures; the rate the link carries, as the piece cutter measures it, and the least it carries; and on a page's
- *  WebSocket, the rate the server takes data at, what the uplink holds at that rate, and how long the frames that go at
- *  once waited behind it. */
+ *  WebSocket, the rate the server takes data at, what the uplink holds at that rate, how long the frames that go at
+ *  once waited behind it, and how long what the server sends waits behind what the page's credit let it send. */
 class Link implements SendWait {
   /** The least round trip an attach's probe or a later ping took on this wire, `Infinity` before a probe's answer. */
   pathRtt = Number.POSITIVE_INFINITY
@@ -36,6 +37,8 @@ class Link implements SendWait {
   /** In bytes per ms: the fastest of the newest rates the peer took data at, 0 before any. */
   drainRate = 0
   private readonly drainRates: number[] = []
+  /** In bytes per ms, what the newest acknowledgement that spanned any time says data arrived at. */
+  private arrivalRate = 0
   /** The bytes and ms of arrivals not yet in a rate. */
   private spanBytes = 0
   private spanMs = 0
@@ -44,6 +47,74 @@ class Link implements SendWait {
   private queuedAt = 0
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
   private readonly waits = new Waits()
+  /** The credit the channels on this wire granted the peer that reached it, each grant on its way and when it reaches
+   *  it, and the bytes that arrived against it. */
+  private grantedBytes = 0
+  private readonly grants = new Fifo<{ bytes: number; at: number }>()
+  private creditArrivedBytes = 0
+  /** In bytes per ms: the fastest of the newest rates the peer's messages arrived at while they kept coming, 0 before
+   *  any. The bytes of the span being measured, since when, and when the newest arrived. */
+  private deliveryRate = 0
+  private readonly deliveryRates: number[] = []
+  private deliveredBytes = 0
+  private deliveredFrom = 0
+  private deliveredAt = Number.NEGATIVE_INFINITY
+  /** The span being measured started as the one before it ended, not after a pause. */
+  private deliveryGoesOn = false
+
+  /** The channels on this wire granted the peer `bytes` more credit: it reaches it once what the uplink holds drained. */
+  granted(bytes: number): void {
+    const rate = this.uplinkRate()
+    this.grantsReached()
+    this.grants.push({ bytes, at: performance.now() + (rate > 0 ? this.inUplink() / rate : 0) })
+  }
+
+  /** `bytes` arrived against the credit the channels on this wire granted. */
+  creditArrived(bytes: number): void {
+    this.creditArrivedBytes += bytes
+  }
+
+  /** A message of `bytes` from the peer arrived at `at`. After a pause a new span starts: the rate is the link's while
+   *  messages keep coming. */
+  delivered(bytes: number, at: number): void {
+    if (at - this.deliveredAt > DRAIN_SPAN_MS) {
+      this.deliveredFrom = this.deliveredAt = at
+      this.deliveredBytes = 0
+      this.deliveryGoesOn = false
+      return
+    }
+    this.deliveredAt = at
+    this.deliveredBytes += bytes
+    const span = at - this.deliveredFrom
+    if (span < DRAIN_SPAN_MS) return
+    this.deliveryRates.push(this.deliveredBytes / span)
+    if (this.deliveryRates.length > DRAIN_RATES) this.deliveryRates.shift()
+    this.deliveryRate = Math.max(...this.deliveryRates)
+    this.deliveredBytes = 0
+    this.deliveredFrom = at
+    this.deliveryGoesOn = true
+  }
+
+  /** How long a frame the peer sends now waits behind what it sent before: while its messages keep coming at half the
+   *  rate they came at or more, what the credit it has lets it have sent and not yet arrived, at that rate; else none. */
+  peerQueueWait(): number {
+    const now = performance.now()
+    if (this.deliveryRate === 0 || now - this.deliveredAt > DRAIN_SPAN_MS) return 0
+    // The span so far, or where it just started as the one before it ended, that one.
+    const elapsed = now - this.deliveredFrom
+    const lately = Math.max(
+      this.deliveredBytes / Math.max(1, elapsed),
+      this.deliveryGoesOn && elapsed < DRAIN_SPAN_MS ? this.deliveryRates.at(-1)! : 0,
+    )
+    if (lately < this.deliveryRate / 2) return 0
+    this.grantsReached()
+    return Math.max(0, this.grantedBytes - this.creditArrivedBytes) / this.deliveryRate
+  }
+
+  private grantsReached(): void {
+    const now = performance.now()
+    while (this.grants.length > 0 && this.grants.peek()!.at <= now) this.grantedBytes += this.grants.shift()!.bytes
+  }
 
   /** Takes a round trip a probe on this wire took. Returns whether it is the first. */
   measured(rtt: number): boolean {
@@ -72,8 +143,15 @@ class Link implements SendWait {
     return true
   }
 
+  /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement that spanned any time says
+   *  data arrived at. */
+  uplinkRate(): number {
+    return this.arrivalRate > 0 ? Math.min(this.drainRate, this.arrivalRate) : this.drainRate
+  }
+
   /** Takes `bytes` that arrived over `spanMs`, the newest, and takes a rate once they span `DRAIN_SPAN_MS`. */
   arrived(bytes: number, spanMs: number): void {
+    if (spanMs > 0) this.arrivalRate = bytes / spanMs
     this.spanBytes += bytes
     this.spanMs += spanMs
     if (this.spanMs < DRAIN_SPAN_MS) return

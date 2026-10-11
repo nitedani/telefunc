@@ -1842,6 +1842,27 @@ test.each([
   },
 )
 
+// The server's acknowledgements of the page's upload wait behind its download, so they come late, and in clumps.
+test("on a 1250 B/ms uplink with bursts of 2400 KiB every 2000 ms beside a 20 MB/s download, the page's uplink never idles while it holds data back", async () => {
+  let idle = 0
+  await downloadBeside(1_250, (page) => {
+    const timer = setInterval(() => void page.sendBinary(new Uint8Array(2_400 * KIB)).catch(() => {}), 2_000)
+    const sender = (page as unknown as { _connection: { transport: { pieceSender: { heldBytes: number } } } })
+      ._connection.transport
+    const measureFrom = Date.now() + 10_000
+    const sampler = setInterval(() => {
+      const pipe = loop.socket.toServer as unknown as { queue: unknown[]; lastAt: number }
+      if (Date.now() < measureFrom) return
+      if (sender.pieceSender.heldBytes > 0 && (pipe.queue.length === 0 || pipe.lastAt < Date.now())) idle++
+    }, 1)
+    return () => {
+      clearInterval(timer)
+      clearInterval(sampler)
+    }
+  })
+  expect(idle).toBe(0)
+})
+
 test.each([
   [100, 16, { down: 19.9055, up: 44.7, wait: 2_583, longest: 3_316 }],
   [100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],

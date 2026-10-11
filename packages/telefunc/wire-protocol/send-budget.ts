@@ -22,11 +22,12 @@ const SHED_SHARE = 0.5
  *  frames that don't wait pass it.
  *
  *  The room is the allowance less what the uplink holds, or less what the server hasn't acknowledged where that is more,
- *  but for what late acknowledgements hide and what the server takes before it acknowledges. What the uplink holds is the
- *  data handed to the socket, drained at the rate the server takes it (see `Link`). While the room is used up and the
- *  uplink holds data, a timer looks again as it drains. The frames that go at once wait behind what it holds, and a
- *  page's download window covers that wait: the budget notes it on the link as the uplink's model says when each is
- *  handed, and as the server's acknowledgements measure it for data.
+ *  but for what late acknowledgements hide and what the server takes before it acknowledges. An acknowledgement waits
+ *  behind what the server sends, as long as what the download's credit lets the server have sent takes to arrive (see
+ *  `Link.peerQueueWait`). What the uplink holds is the data handed to the socket, drained at the rate the server takes
+ *  it (see `Link`). While the room is used up and the uplink holds data, a timer looks again as it drains. The frames
+ *  that go at once wait behind what it holds, and a page's download window covers that wait: the budget notes it on the
+ *  link as the uplink's model says when each is handed, and as the server's acknowledgements measure it for data.
  *
  *  The allowance is what keeps data from waiting long in those queues. A PIECES_ACK says when the newest data it covers
  *  arrived, only as the µs after the data the ack before covered, so the clocks of the two ends need not agree: data's
@@ -121,7 +122,9 @@ class SendBudget {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.link.inUplink() + sent - this.sender.transmittedBytes)
     // The server acknowledges what arrived once `WIRE_PIECES_ACK_BYTES` did: up to that much arrived unacknowledged.
-    const unarrived = unacknowledged - this.link.drainRate * this.lateMs - WIRE_PIECES_ACK_BYTES
+    // More arrives while an acknowledgement comes back, or would wait behind what the server sends now.
+    const late = Math.max(this.lateMs, this.link.peerQueueWait())
+    const unarrived = unacknowledged - this.link.uplinkRate() * late - WIRE_PIECES_ACK_BYTES
     return this.allowance - Math.max(waiting, unarrived)
   }
 

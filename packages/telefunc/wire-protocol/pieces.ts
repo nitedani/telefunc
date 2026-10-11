@@ -12,6 +12,8 @@ import {
   WIRE_PROBE_PAIR_BYTES,
   WIRE_ROOM_PIECE_MIN_BYTES,
   WIRE_SEND_ACK_GAP_MS,
+  WIRE_SEND_ACK_MIN_BYTES,
+  WIRE_SEND_ACK_MS,
 } from './constants.js'
 import { Link } from './link.js'
 import { TAG, assertProtocol, encode, isSequencedTag } from './shared-ws.js'
@@ -371,8 +373,8 @@ class PieceSender {
  *  The two pieces after an empty one are acknowledged at once: their sender may measure the rate by them. Bytes announced
  *  are waited for at the rate their newest message came at, dated apart from the message before it. A receiver whose peer
  *  holds data back by what it acknowledges (`peerHoldsBack`: the server's, see `SendBudget`) acknowledges each announced
- *  message, as its peer's PINGs wait behind them, and once more than `WIRE_PIECES_ACK_BYTES` of frames of any size are
- *  unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`. Any other acknowledges when a frame over
+ *  message, as its peer's PINGs wait behind them, once more than `WIRE_PIECES_ACK_BYTES` of frames of any size are
+ *  unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`, and data within `WIRE_SEND_ACK_MS`. Any other acknowledges when a frame over
  *  `WIRE_PIECES_ACK_BYTES` or the last of an announcement arrived, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`:
  *  all a sender needs that cuts its pieces by the rate it measures, and stops announcing by the rate it carries. */
 class PieceReceiver {
@@ -399,6 +401,7 @@ class PieceReceiver {
   private acknowledgedDataAt: number | null = null
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
+  private ackDue = 0
 
   constructor(
     private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
@@ -494,14 +497,28 @@ class PieceReceiver {
 
   private date(data: boolean, at: number): void {
     this.newestAt = at
-    if (data) this.newestDataAt = at
+    if (!data) return
+    this.newestDataAt = at
+    if (this.options.peerHoldsBack && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES)
+      this.acknowledgeIn(WIRE_SEND_ACK_MS)
   }
 
   private acknowledgeSoon(): void {
     const wait =
       this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt
     if (wait <= 0) this.acknowledge()
-    else this.ackTimer ??= unrefTimer(setTimeout(() => this.acknowledge(), wait))
+    else this.acknowledgeIn(wait)
+  }
+
+  /** Acknowledges `ms` from now, or sooner where it already would. */
+  private acknowledgeIn(ms: number): void {
+    const due = performance.now() + ms
+    if (this.ackTimer !== null) {
+      if (this.ackDue <= due) return
+      clearTimeout(this.ackTimer)
+    }
+    this.ackDue = due
+    this.ackTimer = unrefTimer(setTimeout(() => this.acknowledge(), ms))
   }
 
   private acknowledge(): void {

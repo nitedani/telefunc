@@ -2104,6 +2104,7 @@ class WsTransport implements UpgradeTarget {
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
       this.heartbeat?.noteReceived((data as ArrayBuffer).byteLength, now)
+      link.delivered((data as ArrayBuffer).byteLength, now)
       budget.received()
       const message = receiveMessage(ws, pieces, data, now)
       if (message === null) return
