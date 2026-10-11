@@ -1386,6 +1386,28 @@ test('on a fresh fast wire, frames of 32 KB and 128 KB go at once, in pieces tha
   expect(loop.sockets).toHaveLength(1)
 })
 
+// The page's PINGs wait behind the rest of a frame it sends in pieces: the server answers what arrives once a ping
+// interval, so the page knows it arrives, whatever the pieces.
+test("on a 100 B/ms uplink, the server answers the pieces of the page's 1 MB frame with a PONG once a ping interval, besides its answers to the page's PINGs", async () => {
+  config.channel.pingInterval = 1_000
+  loop.linkBytesPerMs = 100
+  const { server, page } = loop.open<Uint8Array, never>()
+  let got = 0
+  server.listenBinary(() => void got++)
+  await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000)
+  // A first frame measures the rate the next is cut by.
+  void page.sendBinary(new Uint8Array(20_000))
+  await runUntil(() => got === 1, 60_000)
+  const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+  const start = Date.now()
+  void page.sendBinary(new Uint8Array(1_000_000))
+  await runUntil(() => got === 2, 60_000)
+  const pongs = loop.sent.server.slice(marks.server).filter(([tag]) => tag === TAG.PONG).length
+  const pings = loop.sent.page.slice(marks.page).filter(([tag]) => tag === TAG.PING).length
+  expect(pongs).toBeLessThanOrEqual(pings + Math.ceil((Date.now() - start) / 1_000))
+  expect(loop.sockets).toHaveLength(1)
+})
+
 /** What the page counts as handed to its socket, and as taken from the server. */
 const pageCounts = (page: unknown) =>
   (

@@ -435,11 +435,10 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
-    // Each piece answered: the page's PINGs wait behind the rest of its frame.
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
-    this.pong(entry, connection, [])
+    this.answerArrival(entry, connection)
     const { state } = entry
     let frame: Uint8Array<ArrayBuffer> | null
     try {
