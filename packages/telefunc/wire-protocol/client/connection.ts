@@ -2110,6 +2110,7 @@ class WsTransport implements UpgradeTarget {
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
         if (budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) this.onRoom(sender)
+        else ws.close()
         return
       }
       if (frame.tag === TAG.PONG) {
