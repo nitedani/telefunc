@@ -415,18 +415,23 @@ class PieceReceiver {
   /** Takes an ANNOUNCE that arrived at `at`: `bytes` of frames follow it at once, over a link that carries `floor` bytes
    *  per ms at least, 0 for none named. */
   announce(bytes: number, at: number, floor = 0): void {
-    this.announced += bytes
+    // Its sender sends all it announced before it announces more.
+    assertProtocol(this.announced === 0, 'ANNOUNCE before what the one before announced arrived')
+    this.announced = bytes
     this.announcedAt = at
     this.floor = floor
   }
 
   /** Until when it waits for the next message of what was announced: twice the time `announcedNext` of the newest takes at
-   *  the rate it came at, or before any, at the floor; 0 for none. */
-  get expectedBy(): number {
+   *  the rate it came at, or before any, at the floor, but no slower than a link a PING crosses carries,
+   *  `WIRE_PROBE_FIRST_BYTES` per `pingDeadline`; 0 for none. */
+  expectedBy(pingDeadline: number): number {
     const rate = this.rate || this.floor
     if (this.announced === 0 || rate === 0) return 0
     const next = Math.min(this.announced, announcedNext(this.lastAnnounced, this.floor))
-    return this.announcedAt + (WIRE_ANNOUNCED_WAIT_MARGIN * next) / rate
+    return (
+      this.announcedAt + (WIRE_ANNOUNCED_WAIT_MARGIN * next) / Math.max(rate, WIRE_PROBE_FIRST_BYTES / pingDeadline)
+    )
   }
 
   /** Dates a message of `bytes` that arrived at `at`, if it was announced, and returns whether it was. */

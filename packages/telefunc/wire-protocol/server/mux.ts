@@ -11,6 +11,7 @@ import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
+  TIMER_DELAY_MAX_MS,
   UPGRADE_MAX_ID_BYTES,
   UPGRADE_MAX_STAGED_BYTES,
   UPGRADE_MAX_STAGED_RECORDS,
@@ -1136,10 +1137,10 @@ class ChannelMux {
         // has delivered nothing for the deadline, and nothing of what the page announced for the time that takes.
         const deadAt = Math.max(
           state.lastReceivedAt + this.options.pingDeadline,
-          state.pieces?.receiver.expectedBy ?? 0,
+          state.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,
         )
         const now = performance.now()
-        if (now < deadAt) return this.armPingDeadline(connection, entry, deadAt - now)
+        if (now < deadAt) return this.armPingDeadline(connection, entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)

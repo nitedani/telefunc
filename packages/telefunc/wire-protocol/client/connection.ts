@@ -111,7 +111,7 @@ class Heartbeat {
 
   constructor(
     readonly intervalMs: number,
-    private readonly pongTimeoutMs: number,
+    readonly pongTimeoutMs: number,
     private readonly send: () => void,
     private readonly onDead: () => void,
   ) {}
@@ -1971,7 +1971,7 @@ class WsTransport implements UpgradeTarget {
   attachHeartbeat(hb: Heartbeat): void {
     this.heartbeat = hb
     // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
-    hb.expectFrom(() => Math.max(this.pieces?.expectedBy ?? 0, this.pieceSender?.acknowledgedBy ?? 0))
+    hb.expectFrom(() => Math.max(this.pieces?.expectedBy(hb.pongTimeoutMs) ?? 0, this.pieceSender?.acknowledgedBy ?? 0))
   }
 
   detachHeartbeat(): void {

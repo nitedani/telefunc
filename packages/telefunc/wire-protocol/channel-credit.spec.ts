@@ -1456,6 +1456,50 @@ test('pieces of a frame larger than the runtime takes in one message cut the wir
   }
 })
 
+test.each([
+  ['naming a floor of 1 B/s', 1, []],
+  ['then sending 1 B pieces further and further apart', 0, [10, 150_000]],
+])(
+  'a peer that announces bytes it never sends, %s, has its wire cut once it was quiet twice the time 8 KiB takes at 64 B per ping deadline, the timer always within what setTimeout takes',
+  async (_, floorPerS, gaps) => {
+    config.channel.pingInterval = 1_000
+    const delays: number[] = []
+    const realSetTimeout = globalThis.setTimeout
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0)
+      return realSetTimeout(fn, ms)
+    }) as typeof setTimeout)
+    // A raw WebSocket to the server, no page behind it.
+    const socket = new LoopbackSocket('ws://hostile')
+    await run(10)
+    socket.send(encode.announce(0xffffffff, floorPerS))
+    for (const gap of gaps) {
+      await run(gap)
+      socket.send(encode.piece(1_000, new Uint8Array(1)))
+    }
+    // 2 × 8 KiB at 64 B per 2 s.
+    await run(511_000)
+    const open = socket.readyState
+    await run(2_000)
+    spy.mockRestore()
+    expect({ open, closed: socket.readyState, overRange: delays.filter((ms) => ms > 2 ** 31 - 1).length }).toEqual({
+      open: 1,
+      closed: 3,
+      overRange: 0,
+    })
+  },
+)
+
+test('a peer that announces more before what it announced arrived has its wire cut', async () => {
+  const socket = new LoopbackSocket('ws://hostile')
+  await run(10)
+  socket.send(encode.announce(100, 0))
+  socket.send(encode.piece(100, new Uint8Array(50)))
+  socket.send(encode.announce(100, 0))
+  await run(100)
+  expect(socket.readyState).toBe(3)
+})
+
 test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {
   config.channel.pingInterval = 1_000
   const feed = loop.open<string, never>()

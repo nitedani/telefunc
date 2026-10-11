@@ -241,16 +241,16 @@ test('a receiver waits for what was announced twice the time its next message ta
   const receiver = new PieceReceiver(() => {}, { peerHoldsBack: false })
   receiver.announce(100_000, 0)
   // Before a message of it arrived, it knows no rate.
-  expect(receiver.expectedBy).toBe(0)
+  expect(receiver.expectedBy(10_000)).toBe(0)
   receiver.add(100_000, new Uint8Array(0), 0)
   receiver.add(100_000, data(64), 10)
   // 64 B in 10 ms; the next may carry 8 KiB: 2 × 8192 / 6.4.
-  expect(receiver.expectedBy).toBe(10 + 2_560)
+  expect(receiver.expectedBy(10_000)).toBe(10 + 2_560)
   receiver.add(100_000, new Uint8Array(16_384), 1_000)
   // 16 KiB in 990 ms; the next may carry twice as much: 2 × 32 KiB at that rate.
-  expect(receiver.expectedBy).toBe(1_000 + 3_960)
+  expect(receiver.expectedBy(10_000)).toBe(1_000 + 3_960)
   expect(receiver.add(100_000, new Uint8Array(100_000 - 64 - 16_384), 2_000)).not.toBeNull()
-  expect(receiver.expectedBy).toBe(0)
+  expect(receiver.expectedBy(10_000)).toBe(0)
 })
 
 test.each([
