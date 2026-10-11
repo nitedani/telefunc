@@ -44,16 +44,16 @@ type SendRoom = {
 
 const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
 
-/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. With a
- *  rate measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a larger frame
- *  starts with a probe pair, whose acknowledgements measure the rate, and goes at once with the frames sent in its task,
- *  and those sent while the probe is out in theirs, behind an ANNOUNCE of their bytes, each whole or in pieces as
- *  `announcedNext` allows. So does a smaller data frame, unless it crosses within its ping deadline: one of
- *  `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at the floor, the rate the link carries at least by what its
- *  receiver took by an answer, a heartbeat or an acknowledged announcement. A smaller control frame, such as the
- *  handshake's, goes whole. With a rate measured, a data frame past its room (see `SendRoom`) goes in pieces as far as
- *  that goes, and its rest waits for `sendHeld`: the frames after it wait too, but those that
- *  aren't data and go whole, as a window update does. */
+/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. With
+ *  a rate measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a larger
+ *  frame starts with a probe pair, whose acknowledgements measure the rate, and goes at once, as does each frame sent
+ *  while the probe is out, behind an ANNOUNCE of its bytes, whole or in pieces as `announcedNext` allows. So does a
+ *  smaller data frame, unless it crosses within its ping deadline: one of `WIRE_PROBE_FIRST_BYTES` on any link, a
+ *  larger one at the floor, the rate the link carries at least by what its receiver took by an answer, a heartbeat or
+ *  an acknowledged announcement. A smaller control frame, such as the handshake's, goes whole. With a rate measured, a
+ *  data frame past its room (see `SendRoom`) goes in pieces as far as that goes, and its rest waits for `sendHeld`: the
+ *  frames after it wait too, but those that aren't data and go whole, as a window update does.
+ */
 class PieceSender {
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
    *  arrived, when it was sent, the bytes sent through it, and whether it was a probe's. */
@@ -68,11 +68,10 @@ class PieceSender {
   private probe: { end: number; second: number | null } | null = null
   /** The rest of a data frame, waiting for room. */
   private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** The frames sent after the rest, but those that pass it; else the frames of this task, announced at its end. */
+  /** The frames sent after the rest, but those that pass it. */
   private readonly held = new Fifo<Uint8Array<ArrayBuffer>>()
-  /** The bytes waiting for room, or to be announced. */
+  /** The bytes waiting for room. */
   heldBytes = 0
-  private announcing = false
   /** The bytes of the newest message it announced; each it announced and its receiver hasn't acknowledged: where it ends,
    *  of all it sent, and when it went; and when the newest acknowledgement came. */
   private lastAnnounced = 0
@@ -122,11 +121,8 @@ class PieceSender {
       // It passes what waits: the probe its peer waits on may be its own.
       return this.pass(frame)
     }
-    if (this.rest === null && !this.announcing) {
-      if (!this.announces(frame)) return this.pass(frame)
-      this.announcing = true
-      queueMicrotask(this.announce)
-    } else if (this.passesRest(frame)) return this.pass(frame)
+    if (this.rest === null) return this.announces(frame) ? this.announce(frame) : this.pass(frame)
+    if (this.passesRest(frame)) return this.pass(frame)
     this.held.push(frame)
     this.heldBytes += frame.byteLength
   }
@@ -194,23 +190,18 @@ class PieceSender {
     this.heldBytes += frame.byteLength - offset
   }
 
-  /** Announces the frames of this task, and sends them. */
-  private readonly announce = (): void => {
-    this.announcing = false
+  /** Announces `frame`, and sends it. */
+  private announce(frame: Uint8Array<ArrayBuffer>): void {
+    const bytes = frame.byteLength
     const now = performance.now()
     const start = this.transmittedBytes
     const floorPerS = Math.min(0xffffffff, Math.floor(this.link.floor * 1000))
     this.namedFloor = floorPerS / 1000
     this.transmitted(ANNOUNCE_BYTES, false)
-    this.transmit(encode.announce(this.heldBytes, floorPerS))
-    while (this.held.length > 0) {
-      const frame = this.held.shift()!
-      const bytes = frame.byteLength
-      this.heldBytes -= bytes
-      if (bytes > this.largest) this.largest = bytes
-      if (this.link.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
-      else this.sendAnnounced(frame, 0, now)
-    }
+    this.transmit(encode.announce(bytes, floorPerS))
+    if (bytes > this.largest) this.largest = bytes
+    if (this.link.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
+    else this.sendAnnounced(frame, 0, now)
     this.announcements.push({ start, end: this.transmittedBytes, at: now })
   }
 

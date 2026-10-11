@@ -21,7 +21,7 @@ const flowControl = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0:
 const PROBE = 5_000
 
 /** A budget on a wire whose rate a probe measured, on a clock the test sets. */
-async function open() {
+function open() {
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const link = new Link()
@@ -31,8 +31,6 @@ async function open() {
     link,
   )
   prober.send(data(PROBE), 5_000)
-  // It goes behind an announcement, at the end of the task.
-  await Promise.resolve()
   prober.acknowledged(WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, 0, 0)
   prober.acknowledged(PROBE, 0, 0)
   const budget = new SendBudget(
@@ -54,8 +52,8 @@ async function open() {
 }
 
 // The server acknowledges what arrived once `WIRE_PIECES_ACK_BYTES` did, so that much may have arrived unacknowledged.
-test('data goes out until the allowance and what the server holds before it acknowledges are sent, and more as it acknowledges', async () => {
-  const { budget } = await open()
+test('data goes out until the allowance and what the server holds before it acknowledges are sent, and more as it acknowledges', () => {
+  const { budget } = open()
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES + WIRE_PIECES_ACK_BYTES - 40_000)
@@ -66,16 +64,16 @@ test('data goes out until the allowance and what the server holds before it ackn
   expect(budget.room).toBeGreaterThan(0)
 })
 
-test('the frames that go at once count against the room, and are not dated', async () => {
-  const { budget } = await open()
+test('the frames that go at once count against the room, and are not dated', () => {
+  const { budget } = open()
   budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
   expect(budget.acknowledged(WIRE_PIECES_ACK_BYTES + 1_000, 0, 0)).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
-test('the allowance grows by what each acknowledgement covers while no frame waits, to the largest credit window', async () => {
-  const { exchange } = await open()
+test('the allowance grows by what each acknowledgement covers while no frame waits, to the largest credit window', () => {
+  const { exchange } = open()
   expect(exchange(32_000, 0)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 32_000)
   expect(exchange(32_000, 10)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 2 * 32_000)
   // A frame past the room would go in pieces as the server acknowledges it: each takes the room, up to 1 MB.
@@ -84,8 +82,8 @@ test('the allowance grows by what each acknowledgement covers while no frame wai
   expect(allowance).toBe(CREDIT_WINDOW_MAX_BYTES)
 })
 
-test('the allowance falls while frames wait more than the target, to the least', async () => {
-  const { exchange } = await open()
+test('the allowance falls while frames wait more than the target, to the least', () => {
+  const { exchange } = open()
   for (let i = 0; i < 20; i++) exchange(32_000, 10)
   // Each frame reaches the server 5 ms later than the one before it, and 10 ms after it.
   let allowance = exchange(32_000, 10)
@@ -99,8 +97,8 @@ test('the allowance falls while frames wait more than the target, to the least',
   expect(allowance).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
-test('a wait that stays over the target with the least allowance is the path having slowed, not a queue', async () => {
-  const { exchange } = await open()
+test('a wait that stays over the target with the least allowance is the path having slowed, not a queue', () => {
+  const { exchange } = open()
   exchange(32_000, 0)
   // The path now takes 200 ms more, for all that follows.
   exchange(32_000, 10 + 200)
@@ -110,8 +108,8 @@ test('a wait that stays over the target with the least allowance is the path hav
 })
 
 // A rate measured while the page sent little lags one it sends more at: the data acknowledged is out of the uplink anyway.
-test('a frame that goes at once waits behind none of the data the server acknowledged, however slow the rate measured so far', async () => {
-  const { budget, link, clock, exchange } = await open()
+test('a frame that goes at once waits behind none of the data the server acknowledged, however slow the rate measured so far', () => {
+  const { budget, link, clock, exchange } = open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   budget.send(data(20_000), 5_000)
@@ -122,8 +120,8 @@ test('a frame that goes at once waits behind none of the data the server acknowl
 })
 
 // A burst under the room keeps a slow uplink as busy as one past it: the frames that go at once wait behind either.
-test('the longest wait since an instant is what a frame that went at once after it waited, whether the room ran out or not', async () => {
-  const { budget, link, clock, exchange } = await open()
+test('the longest wait since an instant is what a frame that went at once after it waited, whether the room ran out or not', () => {
+  const { budget, link, clock, exchange } = open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   const start = clock.now
