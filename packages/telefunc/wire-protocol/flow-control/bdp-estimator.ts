@@ -49,7 +49,8 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *        trip the page's attach measured, where it probed one. Where flow-control frames wait
  *        for a batched POST, which an attach's RECONCILE doesn't, the attach isn't probed;
  *      - a round the window held back: the sender's credit ran out with its wire empty, and
- *        nothing arrived for an eighth of the round trip before the ack, which no queue held.
+ *        nothing arrived on the wire, from any channel, for an eighth of the round trip
+ *        before the ack, which no queue held.
  *        Its round trip is the path's, which may have risen since an attach measured it;
  *      - where neither side measured, the ack says whether, since the sender last answered
  *        one, its credit ran out while its wire held nothing (see `FlowControl.onPing`),
@@ -105,8 +106,6 @@ class BdpEstimator {
   /** The round trip a round the window held back took, which a queue can't have lengthened, since the wire was
    *  replaced: lowered as `_pathRtt` is. `Infinity` before. */
   private _boundRtt = Infinity
-  /** When the last frame arrived. */
-  private _receivedAt = 0
   private _lastPingAt = 0
   /** The byte window grew since the last ping went out. */
   private _grewSincePing = false
@@ -142,11 +141,11 @@ class BdpEstimator {
     return wire === this._pathWire ? this._pathRtt : Infinity
   }
 
-  /** Record one received frame (pre-app-processing), which arrived `at`. Returns true iff a `BDP_PING`, of the
+  /** Record one received frame (pre-app-processing). Returns true iff a `BDP_PING`, of the
    *  number `probe` reads, should be emitted: caller fires `sendBdpPing()` synchronously. A single probe
    *  collects samples for both axes — `onPingAck` then derives independent
    *  byte-sample / msg-sample saturation decisions. */
-  onReceive(bytes: number, at: number): boolean {
+  onReceive(bytes: number): boolean {
     let probe = false
     // Skip probe only when *both* axes have already hit their cap — otherwise one of them
     // might still want to grow.
@@ -164,7 +163,6 @@ class BdpEstimator {
     }
     this._bytesReceived += bytes
     this._msgsReceived += 1
-    this._receivedAt = at
     return probe
   }
 
@@ -181,10 +179,10 @@ class BdpEstimator {
   }
 
   /** Settle the `BDP_PING` in flight against its `BDP_PING_ACK`, which says whether the window starved the sender's
-   *  wire, and the path's round trip as the sender measured it, `Infinity` where it measured none. Returns per-axis
-   *  grow suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the CPU-lag
-   *  gate). */
-  onPingAck(probe: number, starved: boolean, senderPathRtt: number): GrowDecision {
+   *  wire, and the path's round trip as the sender measured it, `Infinity` where it measured none. `quietMs`: how long
+   *  the wire had delivered nothing, from any channel, when the ack arrived. Returns per-axis grow suggestions. Caller
+   *  decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the CPU-lag gate). */
+  onPingAck(probe: number, starved: boolean, senderPathRtt: number, quietMs: number): GrowDecision {
     const attach = this._attachProbes.find((pending) => pending.probe === probe)
     if (attach) {
       this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
@@ -204,10 +202,10 @@ class BdpEstimator {
     if (this._pathRtt < Infinity && rtt < this._pathRtt) this._pathRtt = rtt
     if (this._boundRtt < Infinity && rtt < this._boundRtt) this._boundRtt = rtt
     const received = this._bytesReceived - this._bytesAtPingSent
-    // The window held the sender back: its credit ran out with its wire empty, and the wire then delivered nothing for an
-    // eighth of the round trip before the ack, where a queue delivers up to the ack, which waits behind it. So the round
-    // trip is the path's, however much less one measured before.
-    if (starved && received * 3 >= this._byteWindow * 2 && (now - this._receivedAt) * 8 > rtt) this._boundRtt = rtt
+    // The window held the sender back: its credit ran out with its wire empty, and the wire then delivered nothing, on any
+    // channel, for an eighth of the round trip before the ack. A queue the ack waits behind delivers up to it, another
+    // channel's frames too. So the round trip is the path's, however much less one measured before.
+    if (starved && received * 3 >= this._byteWindow * 2 && quietMs * 8 > rtt) this._boundRtt = rtt
     // Where an attach measured the path's round trip, here or at the sender, that tells a queue from the path, wherever
     // the queue is, as does a round the window held back, which took longer if the path's rose since. Else only the sender
     // can, where its runtime reports what its wire holds.

@@ -269,9 +269,9 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
 
   it('byte-refresh threshold scales with the adaptive window', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1, performance.now())
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    flow.onPingAck(emit.probe, true, Infinity)
+    flow.onReceived(1)
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onPingAck(emit.probe, true, Infinity, 0)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
     // consumption assertions below are clean.
@@ -290,21 +290,21 @@ describe('FlowControl — BDP integration', () => {
   // The sample is bytes arriving *between* ping-send and ack-arrival. Cycle
   // fires the probe (one onReceived), accumulates (a second), settles.
   const cycle = ({ flow, emit }: { flow: FlowControl; emit: Emit }, sampleBytes: number) => {
-    flow.onReceived(1, performance.now())
-    flow.onReceived(sampleBytes, performance.now())
-    flow.onPingAck(emit.probe, true, Infinity)
+    flow.onReceived(1)
+    flow.onReceived(sampleBytes)
+    flow.onPingAck(emit.probe, true, Infinity, 0)
   }
 
   it('emits BDP_PING on the first onReceived', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024, performance.now())
+    flow.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(1)
   })
 
   it('does not emit a second BDP_PING while one is in flight', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024, performance.now())
-    flow.onReceived(1024, performance.now())
+    flow.onReceived(1024)
+    flow.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(1)
   })
 
@@ -376,9 +376,9 @@ describe('FlowControl — whether the window starved the wire', () => {
 
   it('grows its own window only on an ack that says the window starved the peer', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1, performance.now())
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    flow.onPingAck(emit.probe, false, Infinity)
+    flow.onReceived(1)
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onPingAck(emit.probe, false, Infinity, 0)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
 })
@@ -390,9 +390,9 @@ describe('FlowControl — reattach', () => {
   it('keeps credit and the grown receive window, and advertises the limits again', () => {
     const { flow, emit } = makeFlow()
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
-    flow.onReceived(1, performance.now())
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    flow.onPingAck(emit.probe, true, Infinity)
+    flow.onReceived(1)
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onPingAck(emit.probe, true, Infinity, 0)
     const grownWindow = flow.byteWindow
     expect(grownWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onConsumed(100)
@@ -430,11 +430,11 @@ describe('FlowControl — reattach', () => {
   // prior wire and won't arrive). A fresh ping must be allowed to fire next.
   it('drops the in-flight BDP ping so the next receive can fire a fresh one', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024, performance.now()) // first ping in flight
+    flow.onReceived(1024) // first ping in flight
     expect(emit.bdpPingCalls).toBe(1)
     flow.reattach()
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    flow.onReceived(1024, performance.now())
+    flow.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(2)
   })
 
@@ -474,7 +474,7 @@ describe('FlowControl — replay buffers', () => {
     const emit = makeEmit()
     const flow = new FlowControl(emit, () => 0)
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES)
     flow.reattach()
     expect(emit.windowCalls).toEqual([])
@@ -513,7 +513,7 @@ describe('FlowControl — replay buffers', () => {
     const { flow, emit } = makeFlow()
     flow.acknowledge()
     expect(emit.windowCalls).toEqual([])
-    flow.onReceived(100, performance.now())
+    flow.onReceived(100)
     flow.onConsumed(100)
     flow.acknowledge()
     flow.acknowledge()
@@ -558,7 +558,7 @@ describe('FlowControl — 32-bit wraparound', () => {
       if (!blocked) {
         const gate = sender.decrement(size)
         sent += size
-        receiver.onReceived(size, performance.now())
+        receiver.onReceived(size)
         inFlight = Math.max(inFlight, sent - consumed)
         if (gate) {
           blocked = true
@@ -632,11 +632,13 @@ async function runPath({
     attached = true
   })
   if (senderProbe !== undefined)
-    toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, false, Infinity) })
+    toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, false, Infinity, 0) })
   let blocked = false
   let budget = 0
   let delivered = 0
   let deliveredLastSecond = 0
+  /** When the receiver's wire last delivered a frame. */
+  let arrivedAt = 0
   for (now = 0; now < ms; now++) {
     vi.advanceTimersByTime(1)
     while (toSender[0] && toSender[0].at <= now) toSender.shift()!.deliver()
@@ -669,11 +671,13 @@ async function runPath({
     if (hidden.length === 0 && wire.length === 0) budget = 0
     while (onLink[0] && onLink[0].at <= now) {
       const { frame } = onLink.shift()!
+      const quiet = now - arrivedAt
+      arrivedAt = now
       if ('starved' in frame) {
-        receiver.onPingAck(frame.probe, frame.starved, frame.pathRtt)
+        receiver.onPingAck(frame.probe, frame.starved, frame.pathRtt, quiet)
         continue
       }
-      receiver.onReceived(frame.bytes, performance.now())
+      receiver.onReceived(frame.bytes)
       receiver.onConsumed(frame.bytes)
       delivered += frame.bytes
       if (now >= ms - 1_000) deliveredLastSecond += frame.bytes

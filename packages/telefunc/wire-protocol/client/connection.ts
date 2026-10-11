@@ -108,6 +108,8 @@ class Heartbeat {
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
   private lastReceivedAt = 0
+  /** How long the wire had delivered nothing when it last delivered. */
+  private quietBeforeLast = 0
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
   private expectedBy = () => 0
 
@@ -132,7 +134,13 @@ class Heartbeat {
   }
 
   noteReceived(at = performance.now()): void {
+    this.quietBeforeLast = at - this.lastReceivedAt
     this.lastReceivedAt = at
+  }
+
+  /** How long the wire had delivered nothing when it last delivered. */
+  quietBefore(): number {
+    return this.quietBeforeLast
   }
 
   expectFrom(expectedBy: () => number): void {
@@ -240,6 +248,8 @@ interface MuxConnection {
   sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
+  /** How long the wire had delivered nothing when it last delivered: when a frame handled as it arrives did. */
+  quietBeforeLast(): number
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -299,6 +309,8 @@ type ClientChannelTransport = {
   hasHeartbeat(): boolean
   /** How long its wire has delivered nothing, as its heartbeat tracks it: `Infinity` without one. */
   quietFor(): number
+  /** How long its wire had delivered nothing when it last delivered, as its heartbeat tracks it: 0 without one. */
+  quietBeforeLast(): number
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>
   dispose(): void
@@ -851,6 +863,10 @@ class ClientConnection implements MuxConnection {
 
   bufferedAmount(): number {
     return this.transport.bufferedAmount() + this.heldForRoomBytes
+  }
+
+  quietBeforeLast(): number {
+    return this.transport.quietBeforeLast()
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -2031,6 +2047,10 @@ class WsTransport implements UpgradeTarget {
     return this.heartbeat?.quietFor() ?? Infinity
   }
 
+  quietBeforeLast(): number {
+    return this.heartbeat?.quietBefore() ?? 0
+  }
+
   drained(): Promise<void> {
     // A socket sends what it buffered before its close, but not what its piece sender holds for a probe.
     if (!this.ws || !this.pieceSender?.heldBytes) return Promise.resolve()
@@ -2739,6 +2759,10 @@ class SseTransport implements UpgradeSource {
 
   quietFor(): number {
     return this.heartbeat?.quietFor() ?? Infinity
+  }
+
+  quietBeforeLast(): number {
+    return this.heartbeat?.quietBefore() ?? 0
   }
 
   drained(): Promise<void> {

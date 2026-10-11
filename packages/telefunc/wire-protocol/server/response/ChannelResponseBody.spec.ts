@@ -15,6 +15,7 @@ function createSender(frames: Uint8Array[]): PeerSender {
       frames.push(frame)
     },
     bufferedAmount: () => 0,
+    quietBeforeFrame: () => 0,
   }
 }
 

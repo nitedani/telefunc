@@ -16,6 +16,7 @@ function createPeer(frames: Uint8Array[]) {
         frames.push(frame)
       },
       bufferedAmount: () => 0,
+      quietBeforeFrame: () => 0,
     },
     7,
     new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),

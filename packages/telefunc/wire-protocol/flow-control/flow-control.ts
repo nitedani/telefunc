@@ -209,11 +209,11 @@ class FlowControl {
     return starved
   }
 
-  /** Receiver-side: account one received frame off the wire, which arrived `at`. Emits a
+  /** Receiver-side: account one received frame off the wire. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
-  onReceived(bytes: number, at: number): void {
+  onReceived(bytes: number): void {
     this._arrived = true
-    if (this._bdp.onReceive(bytes, at)) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
@@ -244,11 +244,11 @@ class FlowControl {
   }
 
   /** Settle `BDP_PING_ACK`, which says whether the window starved the peer's wire, and the path's round trip as the peer
-   *  measured it. Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out
+   *  measured it, and which arrived after the wire had delivered nothing for `quietMs`. Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out
    *  the peer's queue (see `BdpEstimator`), AND our own self-utilisation is below threshold.
    *  On growth, the new limit goes out to the peer immediately. */
-  onPingAck(probe: number, starved: boolean, peerPathRtt: number): void {
-    const suggest = this._bdp.onPingAck(probe, starved, peerPathRtt)
+  onPingAck(probe: number, starved: boolean, peerPathRtt: number, quietMs: number): void {
+    const suggest = this._bdp.onPingAck(probe, starved, peerPathRtt, quietMs)
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'

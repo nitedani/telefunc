@@ -871,8 +871,6 @@ test("on an uplink slower than a quarter window per pong deadline, an upload's p
   expect(server.received.length).toBeGreaterThan(40)
 })
 
-// The page's socket here reports nothing it holds, as a browser's does of what its network stack and kernel hold: a
-// WebSocket's bufferedAmount reads 0 in Chromium while more than a megabyte of the upload waits below it.
 test("a download whose path's round trip rises on its wire grows its window to carry the link's rate", async () => {
   const feed = loop.open<never, Uint8Array>()
   let got = 0
@@ -892,6 +890,8 @@ test("a download whose path's round trip rises on its wire grows its window to c
   expect(loop.sockets).toHaveLength(1)
 })
 
+// The page's socket here reports nothing it holds, as a browser's does of what its network stack and kernel hold: a
+// WebSocket's bufferedAmount reads 0 in Chromium while more than a megabyte of the upload waits below it.
 test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's socket reports it holds", async () => {
   const feed = loop.open<string, never>()
   const server = consume(feed.server)
@@ -902,6 +902,44 @@ test("on a slow uplink, the server's window for an upload stays at its initial s
   expect(flowOf(feed.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   expect(server.received.length).toBeGreaterThan(80)
 })
+
+// Two downloads fill a 20 MB/s link whose round trip is 200 ms, and a third channel's messages, sent every 250 ms, wait
+// behind what the server's socket holds. A runtime that doesn't report it, as workerd, or reports none of what the
+// kernel's send buffer holds, leaves only the page to tell the queue from the path.
+test.each([
+  ['reports nothing', () => undefined],
+  ['reads 0', () => 0],
+])(
+  "two downloads on one wire whose server's socket %s of what it holds keep their windows at what the path carries in a round trip, and a third channel's messages wait no longer behind them",
+  async (_, held) => {
+    loop.linkBytesPerMs = 20_000
+    loop.transport.bufferedAmount = held
+    const a = loop.open<never, Uint8Array>()
+    for (const pipe of [loop.socket.toPage, loop.socket.toServer]) pipe.latencyMs = 100
+    const b = loop.open<never, Uint8Array>()
+    const c = loop.open<never, number>()
+    let got = 0
+    for (const { page } of [a, b]) page.listenBinary((data) => void (got += data.byteLength))
+    const waits: number[] = []
+    c.page.listen((sentAt) => void waits.push(Date.now() - sentAt))
+    await run(2_000)
+    for (const { server } of [a, b])
+      void (async () => {
+        while (!server.isClosed) await server.sendBinary(new Uint8Array(64 * KIB))
+      })().catch(() => {})
+    const ticker = setInterval(() => void c.server.send(Date.now()).catch(() => {}), 250)
+    await run(30_000)
+    const before = got
+    waits.length = 0
+    await run(10_000)
+    clearInterval(ticker)
+    expect((got - before) / 10_000).toBeGreaterThan(0.9 * 20_000)
+    // 4 MB in flight fills the path: a window of 4 MiB each.
+    for (const { page } of [a, b]) expect(flowOf(page).byteWindow).toBeLessThanOrEqual(4 * 1024 * KIB)
+    expect(Math.max(...waits)).toBeLessThan(400)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
 
 // 100 KB/s: the RECONCILE naming the new channel waits 20 s behind the 2 MiB window of the upload, twice the time a page
 // waits for its RECONCILED on a wire that delivers nothing. The server holds the new channel that long.

@@ -22,9 +22,9 @@ afterEach(() => vi.useRealTimers())
 // the full cycle: kick off, accumulate, settle. Commits whichever axis (or
 // both) the suggestion endorsed so subsequent cycles see the grown windows.
 function cycle(bdp: BdpEstimator, sampleBytes: number): boolean {
-  bdp.onReceive(1, performance.now()) // fires ping; bytesReceived=1, msgsReceived=1
-  bdp.onReceive(sampleBytes, performance.now()) // accumulates into byte sample; msgsReceived=2
-  const dec = bdp.onPingAck(bdp.probe, true, Infinity)
+  bdp.onReceive(1) // fires ping; bytesReceived=1, msgsReceived=1
+  bdp.onReceive(sampleBytes) // accumulates into byte sample; msgsReceived=2
+  const dec = bdp.onPingAck(bdp.probe, true, Infinity, 0)
   if (dec.bytes === 'grow') bdp.growBytes()
   if (dec.msgs === 'grow') bdp.growMsgs()
   return dec.bytes === 'grow'
@@ -40,16 +40,16 @@ describe('BdpEstimator', () => {
   // estimator starts measuring. Returning false here would mean we never sample.
   it('fires a BDP_PING on the first onReceive', () => {
     const bdp = new BdpEstimator()
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // The "one ping in flight" invariant: subsequent receives during the same RTT
   // window must NOT fire additional pings. Catches a missing `_pingInFlight` guard.
   it('does not fire another ping while one is in flight', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(1024, performance.now())
-    expect(bdp.onReceive(1024, performance.now())).toBe(false)
-    expect(bdp.onReceive(1024, performance.now())).toBe(false)
+    bdp.onReceive(1024)
+    expect(bdp.onReceive(1024)).toBe(false)
+    expect(bdp.onReceive(1024)).toBe(false)
   })
 
   // After the previous sample completes, the next byte should fire again — only
@@ -57,10 +57,10 @@ describe('BdpEstimator', () => {
   // saturate (`grow` verdict) or the estimator settles and stops probing.
   it('fires another ping after the previous ack and the min interval has elapsed', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES, performance.now()) // saturating: sample → grow, no settle
-    bdp.onPingAck(bdp.probe, true, Infinity)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES) // saturating: sample → grow, no settle
+    bdp.onPingAck(bdp.probe, true, Infinity, 0)
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // Min-interval throttle: even with the previous ack settled, we should not fire
@@ -68,12 +68,12 @@ describe('BdpEstimator', () => {
   // protection — prevents thousands of pings/sec on sub-ms RTT.
   it('throttles pings to at most one per BDP_PING_MIN_INTERVAL_MS', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES, performance.now()) // saturating: keeps probing alive
-    bdp.onPingAck(bdp.probe, true, Infinity)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES) // saturating: keeps probing alive
+    bdp.onPingAck(bdp.probe, true, Infinity, 0)
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS - 1)
-    expect(bdp.onReceive(1024, performance.now())).toBe(false)
+    expect(bdp.onReceive(1024)).toBe(false)
     vi.advanceTimersByTime(1)
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // Sample saturates → window doubles. The sample is the bytes arriving while
@@ -106,10 +106,14 @@ describe('BdpEstimator', () => {
   // waits on the wire the byte window bounds, so the message window grows on its sample as before.
   it('does not grow a byte window whose sender always had a backlog on its wire, however saturated the sample', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(1, performance.now())
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL; i++) bdp.onReceive(1, performance.now())
-    expect(bdp.onPingAck(bdp.probe, false, Infinity)).toEqual({ acknowledged: true, bytes: 'wire-busy', msgs: 'grow' })
+    bdp.onReceive(1)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
+    for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL; i++) bdp.onReceive(1)
+    expect(bdp.onPingAck(bdp.probe, false, Infinity, 0)).toEqual({
+      acknowledged: true,
+      bytes: 'wire-busy',
+      msgs: 'grow',
+    })
     expect(bdp.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
 
@@ -119,9 +123,9 @@ describe('BdpEstimator', () => {
     const bdp = new BdpEstimator()
     expect(cycle(bdp, CREDIT_WINDOW_INITIAL_BYTES)).toBe(true)
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1, performance.now())
-    bdp.onReceive(2 * CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    expect(bdp.onPingAck(bdp.probe, true, Infinity).bytes).toBe('window-grew')
+    bdp.onReceive(1)
+    bdp.onReceive(2 * CREDIT_WINDOW_INITIAL_BYTES)
+    expect(bdp.onPingAck(bdp.probe, true, Infinity, 0).bytes).toBe('window-grew')
     // The cadence stays at the floor.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     expect(cycle(bdp, 2 * CREDIT_WINDOW_INITIAL_BYTES)).toBe(true)
@@ -132,27 +136,27 @@ describe('BdpEstimator', () => {
    *  delivers it. */
   function probeAfter(bdp: BdpEstimator, rttMs: number, starved: boolean, senderPathRtt = Infinity) {
     vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
-    expect(bdp.onReceive(1, performance.now())).toBe(true)
+    expect(bdp.onReceive(1)).toBe(true)
     vi.advanceTimersByTime(rttMs)
-    bdp.onReceive(bdp.byteWindow, performance.now())
-    return bdp.onPingAck(bdp.probe, starved, senderPathRtt)
+    bdp.onReceive(bdp.byteWindow)
+    return bdp.onPingAck(bdp.probe, starved, senderPathRtt, 0)
   }
 
   /** A ping whose ack comes `rttMs` after it, with a window's worth arriving at once and nothing after: the window held
    *  back its sender, whose credit ran out with its wire empty. */
   function heldBack(bdp: BdpEstimator, rttMs: number) {
     vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
-    expect(bdp.onReceive(1, performance.now())).toBe(true)
-    bdp.onReceive(bdp.byteWindow, performance.now())
+    expect(bdp.onReceive(1)).toBe(true)
+    bdp.onReceive(bdp.byteWindow)
     vi.advanceTimersByTime(rttMs)
-    return bdp.onPingAck(bdp.probe, true, Infinity)
+    return bdp.onPingAck(bdp.probe, true, Infinity, rttMs)
   }
 
   /** An attach's probe on `wire`, answered `rttMs` after it went out. */
   function attach(bdp: BdpEstimator, rttMs: number, wire: number) {
     const probe = bdp.probeAttach(wire)!
     vi.advanceTimersByTime(rttMs)
-    return bdp.onPingAck(probe, false, Infinity)
+    return bdp.onPingAck(probe, false, Infinity, 0)
   }
 
   // An attach's probe goes out ahead of the channel's frames, so its round trip is the path's. A later probe that took
@@ -215,9 +219,9 @@ describe('BdpEstimator', () => {
     const first = bdp.probeAttach(0)!
     const second = bdp.probeAttach(0)!
     vi.advanceTimersByTime(50)
-    bdp.onPingAck(first, false, Infinity)
+    bdp.onPingAck(first, false, Infinity, 0)
     vi.advanceTimersByTime(450)
-    bdp.onPingAck(second, false, Infinity)
+    bdp.onPingAck(second, false, Infinity, 0)
     expect(probeAfter(bdp, 500, true).bytes).toBe('sample-too-small')
   })
 
@@ -226,7 +230,7 @@ describe('BdpEstimator', () => {
     const bdp = new BdpEstimator()
     const early = bdp.probeAttach(0)!
     attach(bdp, 500, 1)
-    bdp.onPingAck(early, false, Infinity)
+    bdp.onPingAck(early, false, Infinity, 0)
     expect(probeAfter(bdp, 500, false).bytes).toBe('grow')
   })
 
@@ -247,7 +251,7 @@ describe('BdpEstimator', () => {
     const probe = bdp.probeAttach(0)!
     bdp.reset()
     vi.advanceTimersByTime(50)
-    bdp.onPingAck(probe, false, Infinity)
+    bdp.onPingAck(probe, false, Infinity, 0)
     expect(probeAfter(bdp, 500, true).bytes).toBe('sample-too-small')
   })
 
@@ -255,14 +259,14 @@ describe('BdpEstimator', () => {
   // probe's ack settles nothing.
   it('ignores an ack that answers another probe than the one in flight', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(1, performance.now())
+    bdp.onReceive(1)
     const stale = bdp.probe
     bdp.reset()
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1, performance.now())
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    expect(bdp.onPingAck(stale, true, Infinity).acknowledged).toBe(false)
-    expect(bdp.onPingAck(bdp.probe, true, Infinity).bytes).toBe('grow')
+    bdp.onReceive(1)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(bdp.onPingAck(stale, true, Infinity, 0).acknowledged).toBe(false)
+    expect(bdp.onPingAck(bdp.probe, true, Infinity, 0).bytes).toBe('grow')
   })
 
   // Hard cap. Once window hits CREDIT_WINDOW_MAX_BYTES, growth stops there —
@@ -291,16 +295,16 @@ describe('BdpEstimator', () => {
       cycle(bdp, bdp.byteWindow)
       vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
       // One msg-saturating cycle: many small frames in flight.
-      bdp.onReceive(1, performance.now())
-      for (let i = 0; i < bdp.msgWindow; i++) bdp.onReceive(1, performance.now())
-      const dec = bdp.onPingAck(bdp.probe, true, Infinity)
+      bdp.onReceive(1)
+      for (let i = 0; i < bdp.msgWindow; i++) bdp.onReceive(1)
+      const dec = bdp.onPingAck(bdp.probe, true, Infinity, 0)
       if (dec.bytes === 'grow') bdp.growBytes()
       if (dec.msgs === 'grow') bdp.growMsgs()
       vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
     }
     expect(bdp.byteWindow).toBe(CREDIT_WINDOW_MAX_BYTES)
     expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_MAX)
-    expect(bdp.onReceive(1024, performance.now())).toBe(false)
+    expect(bdp.onReceive(1024)).toBe(false)
   })
 
   // Adaptive cadence: a non-grow verdict doubles the probe interval — so a
@@ -311,10 +315,10 @@ describe('BdpEstimator', () => {
     expect(cycle(bdp, Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4))).toBe(false)
     // Interval doubled to 2 × MIN — at MIN it must NOT fire yet.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(false)
+    expect(bdp.onReceive(1024)).toBe(false)
     // Past 2 × MIN it fires.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // A transient slow-second shouldn't permanently freeze growth. After a non-grow
@@ -329,7 +333,7 @@ describe('BdpEstimator', () => {
     expect(cycle(bdp, CREDIT_WINDOW_INITIAL_BYTES)).toBe(true)
     // Next probe should fire at the floor (MIN) again, not the backed-off interval.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // Reset preserves the backed-off cadence: BDP is a property of the link, not
@@ -340,16 +344,16 @@ describe('BdpEstimator', () => {
     bdp.reset()
     // Cadence stays at the backed-off value (2 × MIN), so a probe at MIN doesn't fire.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(false)
+    expect(bdp.onReceive(1024)).toBe(false)
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // onPingAck with no ping in flight is a no-op on both axes — defends against
   // stray ACKs arriving after `reset()` dropped the previous in-flight state.
   it('onPingAck without an outstanding ping returns no-grow for both axes', () => {
     const bdp = new BdpEstimator()
-    expect(bdp.onPingAck(bdp.probe, true, Infinity)).toEqual({
+    expect(bdp.onPingAck(bdp.probe, true, Infinity, 0)).toEqual({
       acknowledged: false,
       bytes: 'sample-too-small',
       msgs: 'sample-too-small',
@@ -368,12 +372,12 @@ describe('BdpEstimator', () => {
 
     // Issue a fresh ping, then reset before its ack — the ack should be ignored.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1, performance.now()) // fires a new ping
-    bdp.onReceive(grown, performance.now()) // would have saturated if we let it settle
+    bdp.onReceive(1) // fires a new ping
+    bdp.onReceive(grown) // would have saturated if we let it settle
     bdp.reset()
 
     expect(bdp.byteWindow).toBe(grown) // preserved
-    expect(bdp.onPingAck(bdp.probe, true, Infinity)).toEqual({
+    expect(bdp.onPingAck(bdp.probe, true, Infinity, 0)).toEqual({
       acknowledged: false,
       bytes: 'sample-too-small',
       msgs: 'sample-too-small',
@@ -382,7 +386,7 @@ describe('BdpEstimator', () => {
 
     // A fresh ping can fire after reset.
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(bdp.onReceive(1024, performance.now())).toBe(true)
+    expect(bdp.onReceive(1024)).toBe(true)
   })
 
   // ── Message-count axis ────────────────────────────────────────────────────
@@ -397,9 +401,9 @@ describe('BdpEstimator', () => {
   // `suggest.msgs` is false.
   it('byte-saturating sample grows bytes only, not msgs', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(1, performance.now())
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES, performance.now()) // huge byte sample, msg sample = 2
-    const dec = bdp.onPingAck(bdp.probe, true, Infinity)
+    bdp.onReceive(1)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES) // huge byte sample, msg sample = 2
+    const dec = bdp.onPingAck(bdp.probe, true, Infinity, 0)
     expect(dec).toEqual({ acknowledged: true, bytes: 'grow', msgs: 'sample-too-small' })
   })
 
@@ -407,11 +411,11 @@ describe('BdpEstimator', () => {
   // sample, so `suggest.msgs` fires alone.
   it('msg-saturating sample grows msgs only, not bytes', () => {
     const bdp = new BdpEstimator()
-    bdp.onReceive(1, performance.now()) // fires ping
+    bdp.onReceive(1) // fires ping
     // CREDIT_MSG_WINDOW_INITIAL more single-byte frames → msg sample fills,
     // byte sample stays tiny (1 byte each).
-    for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL; i++) bdp.onReceive(1, performance.now())
-    const dec = bdp.onPingAck(bdp.probe, true, Infinity)
+    for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL; i++) bdp.onReceive(1)
+    const dec = bdp.onPingAck(bdp.probe, true, Infinity, 0)
     expect(dec.msgs).toBe('grow')
     expect(dec.bytes).toBe('sample-too-small')
     bdp.growMsgs()
@@ -421,9 +425,9 @@ describe('BdpEstimator', () => {
 
   function msgCycleOf(bdp: BdpEstimator, msgs: number, starved: boolean) {
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1, performance.now())
-    for (let i = 0; i < msgs; i++) bdp.onReceive(1, performance.now())
-    const dec = bdp.onPingAck(bdp.probe, starved, Infinity)
+    bdp.onReceive(1)
+    for (let i = 0; i < msgs; i++) bdp.onReceive(1)
+    const dec = bdp.onPingAck(bdp.probe, starved, Infinity, 0)
     if (dec.msgs === 'grow') bdp.growMsgs()
     return dec.msgs
   }
@@ -471,9 +475,9 @@ describe('BdpEstimator', () => {
     const bdp = new BdpEstimator()
     expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, true)).toBe('grow')
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1, performance.now())
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
-    expect(bdp.onPingAck(bdp.probe, true, Infinity).bytes).toBe('grow')
+    bdp.onReceive(1)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(bdp.onPingAck(bdp.probe, true, Infinity, 0).bytes).toBe('grow')
   })
 
   // Cap clamping is independent per axis.
@@ -481,9 +485,9 @@ describe('BdpEstimator', () => {
     const bdp = new BdpEstimator()
     let safety = 200
     while (bdp.msgWindow < CREDIT_MSG_WINDOW_MAX && safety-- > 0) {
-      bdp.onReceive(1, performance.now())
-      for (let i = 0; i < bdp.msgWindow; i++) bdp.onReceive(1, performance.now())
-      const dec = bdp.onPingAck(bdp.probe, true, Infinity)
+      bdp.onReceive(1)
+      for (let i = 0; i < bdp.msgWindow; i++) bdp.onReceive(1)
+      const dec = bdp.onPingAck(bdp.probe, true, Infinity, 0)
       if (dec.msgs === 'grow') bdp.growMsgs()
       vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     }

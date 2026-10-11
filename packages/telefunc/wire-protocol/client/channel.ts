@@ -297,7 +297,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes, t0)
+      this._flow.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
       for (const cb of this._listeners.list()) {
@@ -332,7 +332,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     const bytes = data.byteLength
     try {
-      this._flow.onReceived(bytes, t0)
+      this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {
@@ -416,7 +416,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
+        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt, this._connection.quietBeforeLast())
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }

@@ -146,6 +146,8 @@ type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
+  /** How long the wire had delivered nothing when the frame it's handling arrived. */
+  quietBeforeFrame: number
   /** When the last PONG went out. */
   pongedAt: number
   pieces: { sender: PieceSender; receiver: PieceReceiver } | null
@@ -270,6 +272,7 @@ class ChannelMux {
       state: {
         pingTimer: null,
         lastReceivedAt: 0,
+        quietBeforeFrame: 0,
         pongedAt: performance.now(),
         pieces: transport.wholeMessages
           ? {
@@ -296,6 +299,7 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         bufferedAmount: () => this.bufferedAmount(connection),
+        quietBeforeFrame: () => this.connectionEntries.get(connection)?.state.quietBeforeFrame ?? 0,
       },
     })
     const connId = transport.getConnId(connection)
@@ -423,8 +427,11 @@ class ChannelMux {
     if (!pieced) state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
+    // Taken as it arrives: it's handled once those before it were, after later ones arrived.
+    const quietBefore = now - state.lastReceivedAt
     state.lastReceivedAt = now
-    const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
+    const exec = (): Promise<ReconcileOutcome | null> =>
+      this.runInboundTurn(entry, connection, rawFrame, byteLength, quietBefore)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
     this.answerArrival(entry, connection)
     return this.chainRecv(entry, exec)
@@ -523,8 +530,10 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
     byteLength: number,
+    quietBefore: number,
   ): Promise<ReconcileOutcome | null> {
     try {
+      entry.state.quietBeforeFrame = quietBefore
       return (await this.handleFrame(entry, connection, rawFrame)) ?? null
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err

@@ -9,6 +9,8 @@ interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
   bufferedAmount(): number | undefined
+  /** How long the wire had delivered nothing when the frame it's handling arrived. */
+  quietBeforeFrame(): number
 }
 
 /** Wraps a `PeerSender`, encodes frames with a fixed channel index.
