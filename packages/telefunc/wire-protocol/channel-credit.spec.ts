@@ -1386,6 +1386,48 @@ test('on a fresh fast wire, frames of 32 KB and 128 KB go at once, in pieces tha
   expect(loop.sockets).toHaveLength(1)
 })
 
+/** What the page counts as handed to its socket, and as taken from the server. */
+const pageCounts = (page: unknown) =>
+  (
+    page as {
+      _connection: { transport: { pieceSender: { transmittedBytes: number }; pieces: { took: number } } }
+    }
+  )._connection.transport
+
+// A budget sees all it puts on a slow uplink only if every byte counts: a piece's header and an announcement too.
+test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken is what the wire holds, headers included", async () => {
+  loop.linkBytesPerMs = 1
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const at = { server: 0, page: 0 }
+  server.listenBinary(() => void at.server++)
+  page.listenBinary(() => void at.page++)
+  await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000)
+  const socket = loop.socket
+  const serverEnds = () => piecesOf(socket) as { sender: { transmittedBytes: number }; receiver: { took: number } }
+  const off = { up: 0, down: 0 }
+  const sampler = setInterval(() => {
+    const ends = pageCounts(page)
+    off.up = Math.max(
+      off.up,
+      Math.abs(ends.pieceSender.transmittedBytes - serverEnds().receiver.took - socket.toServer.bytes),
+    )
+    off.down = Math.max(
+      off.down,
+      Math.abs(serverEnds().sender.transmittedBytes - ends.pieces.took - socket.toPage.bytes),
+    )
+  }, 3)
+  for (let i = 0; i < 3; i++) {
+    void page.sendBinary(new Uint8Array(3_000))
+    void server.sendBinary(new Uint8Array(3_000))
+  }
+  await runUntil(() => at.server === 3 && at.page === 3, 60_000)
+  await run(1_000)
+  clearInterval(sampler)
+  expect(at).toEqual({ server: 3, page: 3 })
+  expect(off).toEqual({ up: 0, down: 0 })
+  expect(loop.sockets).toHaveLength(1)
+})
+
 // What a lost wire held goes again on the next, which starts as any fresh wire does: behind its announcement, at the rate
 // its link carries.
 test.each((['page', 'server'] as const).flatMap((sender) => (['fast', 'slow'] as const).map((next) => [sender, next])))(

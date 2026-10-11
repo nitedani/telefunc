@@ -42,7 +42,7 @@ class Link implements SendWait {
   /** The bytes and ms of arrivals not yet in a rate. */
   private spanBytes = 0
   private spanMs = 0
-  /** What the uplink holds of the data handed to the socket, as of `queuedAt`. */
+  /** What the uplink holds of the bytes handed to the socket, as of `queuedAt`. */
   private queued = 0
   private queuedAt = 0
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
@@ -161,7 +161,7 @@ class Link implements SendWait {
     this.spanBytes = this.spanMs = 0
   }
 
-  /** What the uplink holds of the data handed to the socket. */
+  /** What the uplink holds of the bytes handed to the socket. */
   inUplink(): number {
     const now = performance.now()
     this.queued = Math.max(0, this.queued - this.drainRate * (now - this.queuedAt))
@@ -169,7 +169,7 @@ class Link implements SendWait {
     return this.queued
   }
 
-  /** Notes `bytes` of data handed to the socket, and returns what the uplink held ahead of them. Before a rate is
+  /** Notes `bytes` handed to the socket, and returns what the uplink held ahead of them. Before a rate is
    *  measured, what the peer acknowledges alone bounds what the uplink holds. */
   handed(bytes: number): number {
     if (this.drainRate === 0) return 0

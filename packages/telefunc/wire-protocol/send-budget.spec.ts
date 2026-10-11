@@ -130,12 +130,12 @@ test('the longest wait since an instant is what a frame that went at once after 
   budget.send(data(20_000), 5_000)
   expect(budget.room).toBeGreaterThan(0)
   budget.send(flowControl(100), 5_000)
-  // 20 KB at 100 B/ms.
-  expect(link.longestWaitSince(start)).toBe(200)
+  // 20 KB at 100 B/ms: it waited 200 ms, and a frame sent now waits behind its 100 B too.
+  expect(link.longestWaitSince(start)).toBe(201)
   clock.now += 150
-  // The uplink drained 15 KB of it since: a frame sent now waits 50 ms, the one before still waited 200.
-  expect(link.waitNow()).toBe(50)
+  // The uplink drained 15 KB since: a frame sent now waits 51 ms, the one before still waited 200.
+  expect(link.waitNow()).toBe(51)
   expect(link.longestWaitSince(start)).toBe(200)
   // Since a later instant, only what a frame sent then waits.
-  expect(link.longestWaitSince(clock.now)).toBe(50)
+  expect(link.longestWaitSince(clock.now)).toBe(51)
 })

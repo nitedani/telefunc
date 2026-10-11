@@ -24,9 +24,9 @@ const SHED_SHARE = 0.5
  *  The room is the allowance less what the uplink holds, or less what the server hasn't acknowledged where that is more,
  *  but for what late acknowledgements hide and what the server takes before it acknowledges. An acknowledgement waits
  *  behind what the server sends, as long as what the download's credit lets the server have sent takes to arrive (see
- *  `Link.peerQueueWait`). What the uplink holds is the data handed to the socket, drained at the rate the server takes
- *  it (see `Link`). While the room is used up and the uplink holds data, a timer looks again as it drains. The frames
- *  that go at once wait behind what it holds, and a page's download window covers that wait: the budget notes it on the
+ *  `Link.peerQueueWait`). What the uplink holds is every byte handed to the socket, headers included, drained at the rate
+ *  the server takes it (see `Link`). While the room is used up and the uplink holds data, a timer looks again as it
+ *  drains. The frames that go at once wait behind what it holds, and a page's download window covers that wait: the budget notes it on the
  *  link as the uplink's model says when each is handed, and as the server's acknowledgements measure it for data.
  *
  *  The allowance is what keeps data from waiting long in those queues. A PIECES_ACK says when the newest data it covers
@@ -66,15 +66,20 @@ class SendBudget {
   ) {
     this.sender = new PieceSender(transmit, queued, link, {
       dataRoom: () => this.roomPast(this.sender.transmittedBytes),
-      handed: (bytes) => this.handed(bytes),
+      handed: (bytes, data) => this.handed(bytes, data),
     })
   }
 
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
+    if (isSequencedTag(frame[0]!)) {
+      this.sender.send(frame, pingInterval)
+      return this.pace()
+    }
+    // What it waits behind: the uplink holds it too once handed.
+    const wait = this.link.waitNow()
     this.sender.send(frame, pingInterval)
-    if (isSequencedTag(frame[0]!)) this.pace()
-    else this.link.noteWait(this.link.waitNow())
+    this.link.noteWait(wait)
   }
 
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
@@ -146,10 +151,11 @@ class SendBudget {
     this.pace()
   }
 
-  /** Notes `bytes` of data the sender handed the socket. Parts handed within a ms of one another make one sample, dated
-   *  by the first. */
-  private handed(bytes: number): void {
+  /** Notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data handed within a
+   *  ms of one another make one sample, dated by the first. */
+  private handed(bytes: number, data: boolean): void {
     const ahead = this.link.handed(bytes)
+    if (!data) return
     const end = this.sender.transmittedBytes
     const at = performance.now()
     const last = this.sent.peekLast()

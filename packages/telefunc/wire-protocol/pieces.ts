@@ -31,12 +31,16 @@ function announcedNext(last: number, floor: number): number {
   return last === 0 && floor === 0 ? WIRE_PROBE_FIRST_BYTES : Math.max(2 * last, WIRE_ANNOUNCED_MIN_BYTES)
 }
 
+/** The bytes a PIECE and an ANNOUNCE add to what they carry. */
+const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
+const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
+
 /** How much data a sender hands its socket: a page's `SendBudget`. */
 type SendRoom = {
   /** With a rate measured, the most bytes of data it hands the socket now. */
   dataRoom(): number
-  /** It handed the socket `bytes` of data. */
-  handed(bytes: number): void
+  /** It handed the socket `bytes`, of data or not. */
+  handed(bytes: number, data: boolean): void
 }
 
 const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
@@ -55,12 +59,11 @@ class PieceSender {
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
    *  arrived, when it was sent, the bytes sent through it, and whether it was a probe's. */
   private readonly unacknowledged = new Fifo<{ crossing: number; at: number; end: number; probe: boolean }>()
-  /** The bytes of the frames sent in all, and those the receiver has acknowledged; the first's, and when it was sent. */
-  sentBytes = 0
+  /** The bytes the receiver has acknowledged; the first frame's, and when it was sent. */
   acknowledgedBytes = 0
   private firstBytes = 0
   private firstAt = 0
-  /** The bytes of the frames handed to the socket. */
+  /** The bytes of the messages handed to the socket, headers and announcements included, as its receiver counts them. */
   transmittedBytes = 0
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
   private probe: { end: number; second: number | null } | null = null
@@ -98,13 +101,17 @@ class PieceSender {
     private readonly room = UNBOUNDED,
   ) {}
 
+  /** The bytes handed to the socket, and of the frames sent, those it holds. */
+  get sentBytes(): number {
+    return this.transmittedBytes + this.heldBytes
+  }
+
   /** Sends `frame`, whole or in pieces. */
   send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
     if (this.sentBytes === 0) {
       this.firstBytes = frame.byteLength
       this.firstAt = performance.now()
     }
-    this.sentBytes += frame.byteLength
     if (pingInterval !== this.pingInterval) {
       this.pingInterval = pingInterval
       this.setWholeUpTo()
@@ -141,7 +148,7 @@ class PieceSender {
     if (bytes > this.largest) this.largest = bytes
     if (bytes > this.wholeUpTo || (this.link.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.room.dataRoom()))
       return this.cut(frame, 0)
-    this.transmitted(frame, bytes)
+    this.transmitted(bytes, isSequencedTag(frame[0]!))
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.transmit(frame)
   }
@@ -160,19 +167,26 @@ class PieceSender {
     if (end === offset) return this.hold(frame, offset)
     // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
     // two pieces at once. One cut only for room is no measure.
-    if (offset === 0 && bytes > this.wholeUpTo) this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
+    if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
-    this.transmitted(frame, end - offset)
-    if (acknowledges(bytes)) this.track(end - offset, now, false)
+    const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
+    this.transmitted(handed, isSequencedTag(frame[0]!))
+    if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size)
       this.transmit(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
     if (end < bytes) this.hold(frame, end)
   }
 
-  /** Counts `bytes` of `frame` handed to the socket. */
-  private transmitted(frame: Uint8Array<ArrayBuffer>, bytes: number): void {
+  /** Counts `bytes` handed to the socket, of data or not. */
+  private transmitted(bytes: number, data: boolean): void {
     this.transmittedBytes += bytes
-    if (isSequencedTag(frame[0]!)) this.room.handed(bytes)
+    this.room.handed(bytes, data)
+  }
+
+  /** Hands the socket the empty piece a frame of `total` bytes starts with. */
+  private sendEmptyPiece(total: number): void {
+    this.transmitted(PIECE_HEADER_BYTES, false)
+    this.transmit(encode.piece(total, new Uint8Array(0)))
   }
 
   /** Holds `frame` from `offset`, for room. */
@@ -188,6 +202,7 @@ class PieceSender {
     const start = this.transmittedBytes
     const floorPerS = Math.min(0xffffffff, Math.floor(this.link.floor * 1000))
     this.namedFloor = floorPerS / 1000
+    this.transmitted(ANNOUNCE_BYTES, false)
     this.transmit(encode.announce(this.heldBytes, floorPerS))
     while (this.held.length > 0) {
       const frame = this.held.shift()!
@@ -204,17 +219,18 @@ class PieceSender {
    *  rest of it. */
   private sendProbe(frame: Uint8Array<ArrayBuffer>, now: number): void {
     const bytes = frame.byteLength
-    this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
+    const data = isSequencedTag(frame[0]!)
+    this.sendEmptyPiece(bytes)
     for (const [at, size] of [
       [0, WIRE_PROBE_FIRST_BYTES],
       [WIRE_PROBE_FIRST_BYTES, WIRE_PROBE_PAIR_BYTES],
     ] as const) {
-      this.transmitted(frame, size)
-      this.track(size, now, true)
+      this.transmitted(PIECE_HEADER_BYTES + size, data)
+      this.track(PIECE_HEADER_BYTES + size, now, true)
       this.sendAnnouncedMessage(encode.piece(bytes, frame.subarray(at, at + size)), size, this.transmittedBytes, now)
     }
     // Its receiver dates only data apart.
-    const second = isSequencedTag(frame[0]!) ? this.transmittedBytes - WIRE_PROBE_PAIR_BYTES : null
+    const second = data ? this.transmittedBytes - PIECE_HEADER_BYTES - WIRE_PROBE_PAIR_BYTES : null
     this.probe = { end: this.transmittedBytes, second }
     this.sendAnnounced(frame, WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, now)
   }
@@ -223,11 +239,12 @@ class PieceSender {
    *  it allows after the one before, but the last two, cut so the last is the larger, which the next may carry twice. */
   private sendAnnounced(frame: Uint8Array<ArrayBuffer>, offset: number, now: number): void {
     const bytes = frame.byteLength
-    const start = this.transmittedBytes - offset
-    this.transmitted(frame, bytes - offset)
-    if (acknowledges(bytes)) this.track(bytes - offset, now, false)
-    if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor))
+    const data = isSequencedTag(frame[0]!)
+    if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor)) {
+      this.transmitted(bytes, data)
+      if (acknowledges(bytes)) this.track(bytes, now, false)
       return this.sendAnnouncedMessage(frame, bytes, this.transmittedBytes, now)
+    }
     const sizes: number[] = []
     for (let left = bytes - offset, last = this.lastAnnounced; left > 0; left -= last) {
       last = Math.min(left, announcedNext(last, this.namedFloor))
@@ -239,9 +256,14 @@ class PieceSender {
       sizes[n - 2] = Math.ceil(both / 3)
       sizes[n - 1] = both - sizes[n - 2]!
     }
+    let end = this.transmittedBytes
+    const handed = bytes - offset + n * PIECE_HEADER_BYTES
+    this.transmitted(handed, data)
+    if (acknowledges(bytes)) this.track(handed, now, false)
     let at = offset
     for (const size of sizes) {
-      this.sendAnnouncedMessage(encode.piece(bytes, frame.subarray(at, at + size)), size, start + at + size, now)
+      end += PIECE_HEADER_BYTES + size
+      this.sendAnnouncedMessage(encode.piece(bytes, frame.subarray(at, at + size)), size, end, now)
       at += size
     }
   }
@@ -288,7 +310,7 @@ class PieceSender {
     return from + (WIRE_ANNOUNCED_WAIT_MARGIN * (next.end - this.acknowledgedBytes)) / rate
   }
 
-  /** Takes a PIECES_ACK: its receiver took `bytes` of the frames in all (mod 2^32), the newest `heldMs` before it sent
+  /** Takes a PIECES_ACK: its receiver took `bytes` of the messages in all (mod 2^32), the newest `heldMs` before it sent
    *  the ack, `spanUs` after the newest data the ack before covered. Returns false if that acknowledges nothing sent, or
    *  more than was sent. */
   acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
@@ -297,7 +319,7 @@ class PieceSender {
     const probe = this.probe
     // The ack of a pair's second piece alone dates it apart from the first: the rate the path took them at.
     if (probe !== null && this.acknowledgedBytes === probe.second && newly === probe.end - probe.second) {
-      this.rise(WIRE_PROBE_PAIR_BYTES / Math.max(spanUs / 1000, WIRE_PROBE_CLOCK_MS), performance.now())
+      this.rise(newly / Math.max(spanUs / 1000, WIRE_PROBE_CLOCK_MS), performance.now())
     }
     this.acknowledgedBytes += newly
     while (this.announcedEnds.length > 0 && this.announcedEnds.peek()!.end <= this.acknowledgedBytes)
@@ -326,7 +348,7 @@ class PieceSender {
     return true
   }
 
-  /** Takes a PING or PONG that arrived at `at`, saying its receiver took `bytes` of the frames in all (mod 2^32): as many
+  /** Takes a PING or PONG that arrived at `at`, saying its receiver took `bytes` of the messages in all (mod 2^32): as many
    *  crossed since the first was sent. Returns false if that is more than were sent. */
   heartbeat(bytes: number, at: number): boolean {
     // Behind the acknowledged bytes if a PIECES_ACK passed it while it waited behind a probe.
@@ -392,7 +414,7 @@ class PieceReceiver {
   private lastAnnounced = 0
   private rate = 0
   private floor = 0
-  /** The bytes of the frames it took in all, and when it last acknowledged. */
+  /** The bytes of the messages it took in all, headers and announcements included, and when it last acknowledged. */
   took = 0
   private acknowledgedTook = 0
   private newestAt = 0
@@ -424,6 +446,7 @@ class PieceReceiver {
   announce(bytes: number, at: number, floor = 0): void {
     // Its sender sends all it announced before it announces more.
     assertProtocol(this.announced === 0, 'ANNOUNCE before what the one before announced arrived')
+    this.took += ANNOUNCE_BYTES
     this.announced = bytes
     this.announcedAt = at
     this.floor = floor
@@ -459,6 +482,7 @@ class PieceReceiver {
   /** Takes a piece that arrived at `at`, and returns the frame once its last piece arrived. */
   add(total: number, piece: Uint8Array, at: number): Uint8Array<ArrayBuffer> | null {
     const bytes = piece.byteLength
+    this.took += PIECE_HEADER_BYTES
     if (this.received === 0) {
       this.total = total
       if (bytes === 0) {
