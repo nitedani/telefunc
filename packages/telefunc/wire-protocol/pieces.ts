@@ -319,7 +319,8 @@ class PieceSender {
   /** Takes a PING or PONG that arrived at `at`, saying its receiver took `bytes` of the frames in all (mod 2^32): as many
    *  crossed since the first was sent. Returns false if that is more than were sent. */
   heartbeat(bytes: number, at: number): boolean {
-    const took = this.acknowledgedBytes + ((bytes - this.acknowledgedBytes) >>> 0)
+    // Behind the acknowledged bytes if a PIECES_ACK passed it while it waited behind a probe.
+    const took = this.acknowledgedBytes + ((bytes - this.acknowledgedBytes) | 0)
     if (took > this.transmittedBytes) return false
     this.raiseFloor(took / Math.max(at - this.firstAt, WIRE_PROBE_CLOCK_MS))
     return true

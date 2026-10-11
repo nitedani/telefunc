@@ -1386,6 +1386,41 @@ test("after a page drops a wire the server still holds open, with a probe of the
   }
 })
 
+test.each([
+  [4600, 500],
+  [4200, 900],
+  [4800, 300],
+  [4900, 400],
+])(
+  "on a slow uplink, a page whose PING waits behind its probe while it acknowledges the server's download past it keeps its wire (%i ms into a ping interval, the download %i ms later)",
+  async (offset, delay) => {
+    const { server, page } = loop.open<Uint8Array, Uint8Array>()
+    const atServer: number[] = []
+    const atPage: number[] = []
+    server.listenBinary((data) => void atServer.push(data.byteLength))
+    page.listenBinary((data) => void atPage.push(data.byteLength))
+    await run(100)
+    // A wire lost with the server's probe unacknowledged: the next wire is slow on both ends.
+    loop.socket.toPage.bytesPerMs = 1
+    void server.sendBinary(new Uint8Array(128_000))
+    await run(100)
+    loop.socket.cut()
+    await runUntil(() => loop.sockets.length === 2 && atPage.length === 1, 10_000)
+    loop.socket.toServer.bytesPerMs = 0.25
+    let pinged = false
+    loop.onSend('page', TAG.PING, () => void (pinged = true))
+    await runUntil(() => pinged, 10_000)
+    await run(offset)
+    void page.sendBinary(new Uint8Array(1_000))
+    await run(delay)
+    void server.sendBinary(new Uint8Array(20_000))
+    await runUntil(() => atServer.length === 1 && atPage.length === 2, 30_000)
+    await run(15_000)
+    expect(atServer).toEqual([1_000])
+    expect(loop.sockets).toHaveLength(2)
+  },
+)
+
 test('the server holds nothing for empty pieces, takes pieces of any size, and cuts a wire on an empty piece in the middle of a frame', async () => {
   loop.open<Uint8Array, Uint8Array>()
   await run(100)
