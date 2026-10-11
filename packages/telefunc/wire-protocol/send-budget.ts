@@ -18,6 +18,8 @@ const SHED_SHARE = 0.5
 const DRAIN_SPAN_MS = 100
 /** The uplink drains at the fastest of this many of the newest such rates. */
 const DRAIN_RATES = 8
+/** How long a wait stays in the history the download's window reads (see `SendWait`). */
+const WAITS_KEPT_MS = 60_000
 
 /** How many bytes of data a page lets its WebSocket's queues hold: the browser's, the network stack's and the path's,
  *  where it can't see them or reorder them, and where a flow-control frame waits behind the data sent before it. A
@@ -28,8 +30,9 @@ const DRAIN_RATES = 8
  *  The room is the allowance less what the uplink holds, or less what the server hasn't acknowledged where that is more,
  *  but for what late acknowledgements hide and what the server takes before it acknowledges. What the uplink holds is the
  *  data handed to the socket, drained at the rate the server takes it. While the room is used up and the uplink holds
- *  data, a timer looks again as it drains. The frames that go at once wait behind what it holds: while the uplink sets
- *  the pace, a page's download window covers that wait (see `SendWait`).
+ *  data, a timer looks again as it drains. The frames that go at once wait behind what it holds, and a page's download
+ *  window covers that wait (see `SendWait`): as the uplink's model says when each is handed, and as the server's
+ *  acknowledgements measure it for data.
  *
  *  The allowance is what keeps data from waiting long in those queues. A PIECES_ACK says when the newest data it covers
  *  arrived, only as the µs after the data the ack before covered, so the clocks of the two ends need not agree: data's
@@ -64,13 +67,8 @@ class SendBudget {
   private queuedAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = 0
-  /** The longest a frame that went at once waited since the round started (see `SendWait`). */
-  private longestWait = 0
-  /** The room ran out while the uplink held data, since it last held none, and so since the round started: the uplink
-   *  sets the pace. Where the page sends less than the link takes, the rate measured is the page's, and what it says the
-   *  uplink holds isn't there. */
-  private limited = false
-  private limitedInRound = false
+  /** How long the frames that go at once waited behind the uplink, and data did as the server acknowledged it. */
+  private readonly waits = new Waits()
   /** Called when the timer finds the uplink drained some of what it held. */
   onRoom: () => void = () => {}
 
@@ -83,19 +81,17 @@ class SendBudget {
   send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
     this.sender.send(frame, pingInterval)
     if (isSequencedTag(frame[0]!)) this.pace()
-    else this.longestWait = Math.max(this.longestWait, this.uplinkWait())
+    else this.waits.note(this.uplinkWait(), performance.now())
   }
 
-  /** `SendWait`: a round starts. Taken off a round trip, a wait it overstates only makes the path's seem shorter. */
-  startRound(): number {
-    this.longestWait = 0
-    this.limitedInRound = this.limited
+  /** `SendWait`: what a frame sent now waits. */
+  waitNow(): number {
     return this.uplinkWait()
   }
 
-  /** `SendWait`: the round ends. Added to the loop the window covers, it counts only where the uplink set the pace. */
-  endRound(): number {
-    return this.limitedInRound ? Math.max(this.longestWait, this.uplinkWait()) : 0
+  /** `SendWait`: the longest a frame that went at once waited since `at`, or one sent now waits. */
+  longestWaitSince(at: number): number {
+    return Math.max(this.waits.since(at), this.uplinkWait())
   }
 
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
@@ -153,9 +149,7 @@ class SendBudget {
   /** While the room is used up and the uplink holds data, the uplink sets the pace, and data may wait for room: looks
    *  again once the uplink carried what its server acknowledges at once, or all it holds. */
   private pace(): void {
-    if (this.drainRate === 0 || this.room > 0 || this.queued === 0) return
-    this.limited = this.limitedInRound = true
-    if (this.paceTimer !== null) return
+    if (this.drainRate === 0 || this.room > 0 || this.queued === 0 || this.paceTimer !== null) return
     const ms = Math.max(1, Math.min(this.queued, WIRE_PIECES_ACK_BYTES) / this.drainRate)
     this.paceDue = performance.now() + ms
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
@@ -176,7 +170,6 @@ class SendBudget {
   private inUplink(): number {
     const now = performance.now()
     this.queued = Math.max(0, this.queued - this.drainRate * (now - this.queuedAt))
-    if (this.queued === 0) this.limited = false
     this.queuedAt = now
     return this.queued
   }
@@ -217,6 +210,7 @@ class SendBudget {
     const atLeast = this.allowance === least
     if (path < this.leastDelay || (atLeast && path - this.leastDelay >= WIRE_QUEUE_DELAY_MS)) this.leastDelay = path
     const wait = delay - this.leastDelay
+    this.waits.note(Math.max(0, wait), performance.now())
     if (wait < WIRE_QUEUE_DELAY_MS) {
       this.allowance += (newly * (WIRE_QUEUE_DELAY_MS - wait)) / WIRE_QUEUE_DELAY_MS
     } else if (spanUs > 0) {
@@ -234,5 +228,40 @@ class SendBudget {
       WIRE_SEND_AHEAD_MIN_BYTES,
       Math.max(WIRE_PIECES_ACK_BYTES + 1024, this.drainRate * WIRE_QUEUE_DELAY_MS),
     )
+  }
+}
+
+/** Waits by when they were seen, for `WAITS_KEPT_MS`. Each drops the earlier ones no longer than it, so the longest since
+ *  an instant is the first at or after it, found by halving. */
+class Waits {
+  private at: number[] = []
+  private wait: number[] = []
+  private head = 0
+
+  note(wait: number, at: number): void {
+    while (this.at.length > this.head && this.wait[this.wait.length - 1]! <= wait) {
+      this.at.pop()
+      this.wait.pop()
+    }
+    this.at.push(at)
+    this.wait.push(wait)
+    while (this.at[this.head]! < at - WAITS_KEPT_MS) this.head++
+    if (this.head > 16 && this.head >= this.at.length >>> 1) {
+      this.at = this.at.slice(this.head)
+      this.wait = this.wait.slice(this.head)
+      this.head = 0
+    }
+  }
+
+  /** The longest wait seen at or after `at`, 0 for none. */
+  since(at: number): number {
+    let lo = this.head
+    let hi = this.at.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (this.at[mid]! < at) lo = mid + 1
+      else hi = mid
+    }
+    return lo < this.at.length ? this.wait[lo]! : 0
   }
 }

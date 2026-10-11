@@ -1827,6 +1827,10 @@ test.each([
   [1_250, 2_400, 2_000, { down: 19.745, up: 1_229.22, wait: 1_314, longest: 3_313 }],
   [100, 100, 2_000, { down: 20.0006, up: 51.64, wait: 2_637, longest: 3_316 }],
   [1_250, 1_000, 2_000, { down: 20.0006, up: 512.43, wait: 2_726, longest: 3_316 }],
+  // Bursts under the page's least send allowance that keep a slow uplink busy.
+  [30, 16, 550, { down: 20.0006, up: 29.93, wait: 2_546, longest: 3_207 }],
+  [100, 12, 125, { down: 20.0006, up: 98.78, wait: 2_799, longest: 3_227 }],
+  [10, 9, 1_000, { down: 20.0006, up: 9.68, wait: 2_476, longest: 3_210 }],
 ])(
   "on a %i B/ms uplink with bursts of %i KiB every %i ms, a 20 MB/s download carries 0.9 of what it does on main's growth rule, the bursts all they offer, and another channel's messages wait no longer",
   async (up, burst, every, main) => {

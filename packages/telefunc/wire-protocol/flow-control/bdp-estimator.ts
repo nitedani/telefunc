@@ -21,10 +21,10 @@ type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 
 /** How long the frames this side sends at once wait behind its own data on its wire, where it can tell (see
  *  `SendBudget`). */
 type SendWait = {
-  /** A probe's round starts: what a frame sent now waits. */
-  startRound(): number
-  /** The round ends: the longest such a frame waited in it. */
-  endRound(): number
+  /** What a frame sent now waits. */
+  waitNow(): number
+  /** The longest such a frame waited since `at`, on `performance.now()`'s clock, or one sent now waits. */
+  longestWaitSince(at: number): number
 }
 
 /** `acknowledged` is true when a ping was in flight to settle (false for
@@ -71,7 +71,7 @@ const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-smal
  *      The window's refreshes wait behind this side's own data on its wire too, so the window
  *      covers that wait as well. Where this side knows how long it is (a page's send budget,
  *      see `SendBudget`), a sample counts at the path's round trip plus the longest any of
- *      this side's frames that go at once waited in the round.
+ *      this side's frames that go at once waited since its ping went out.
  *   3. If the sample saturates ≥ 2/3 of the window, and the queue can't account for it, the
  *      window was the bottleneck → that axis's decision is `grow`; caller may call
  *      `grow()` to double it (clamped to its cap, see `capByteWindow`). Where the sample
@@ -178,7 +178,7 @@ class BdpEstimator {
         // Snapshot BEFORE crediting the triggering frame — it counts as the first
         // in-flight byte. Otherwise a window-bound producer always samples 0.
         this._sendPing()
-        this._pingWait = sendWait?.startRound() ?? 0
+        this._pingWait = sendWait?.waitNow() ?? 0
         this._pingFollowsGrowth = this._grewSincePing
         this._grewSincePing = false
         this._lastPingAt = now
@@ -232,7 +232,7 @@ class BdpEstimator {
     // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later one
     // that took less shows the path takes no more.
     if (this._pathRtt < Infinity && rtt < this._pathRtt) this._pathRtt = rtt
-    const roundWait = sendWait?.endRound() ?? 0
+    const roundWait = sendWait?.longestWaitSince(this._pingSentAt) ?? 0
     const roundRtt = Math.max(1, rtt - this._pingWait)
     if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
     const received = this._bytesReceived - this._bytesAtPingSent

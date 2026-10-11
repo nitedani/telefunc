@@ -108,27 +108,27 @@ test('a frame that goes at once waits behind none of the data the server acknowl
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   budget.send(data(50_000), 5_000)
-  expect(budget.startRound()).toBeGreaterThan(0)
+  expect(budget.waitNow()).toBeGreaterThan(0)
   clock.now += 10
   expect(budget.acknowledged(PROBE + 70_000, 0, 10_000)).toBe(true)
-  expect(budget.startRound()).toBe(0)
+  expect(budget.waitNow()).toBe(0)
 })
 
-// The rate the server took data at is the page's where it sends less than the link takes: a round in which its room never
-// ran out counts no wait of its own.
-test('a round counts what the frames that go at once waited only where the room ran out while the uplink held data', async () => {
+// A burst under the room keeps a slow uplink as busy as one past it: the frames that go at once wait behind either.
+test('the longest wait since an instant is what a frame that went at once after it waited, whether the room ran out or not', async () => {
   const { budget, clock, exchange } = await open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
-  budget.startRound()
+  const start = clock.now
   budget.send(data(20_000), 5_000)
+  expect(budget.room).toBeGreaterThan(0)
   budget.send(flowControl(100), 5_000)
-  expect(budget.endRound()).toBe(0)
-  clock.now += 10
-  expect(budget.acknowledged(PROBE + 40_100, 0, 10_000)).toBe(true)
-  budget.startRound()
-  budget.send(data(200_000), 5_000)
-  expect(budget.room).toBeLessThanOrEqual(0)
-  budget.send(flowControl(100), 5_000)
-  expect(budget.endRound()).toBeGreaterThan(0)
+  // 20 KB at 100 B/ms.
+  expect(budget.longestWaitSince(start)).toBe(200)
+  clock.now += 150
+  // The uplink drained 15 KB of it since: a frame sent now waits 50 ms, the one before still waited 200.
+  expect(budget.waitNow()).toBe(50)
+  expect(budget.longestWaitSince(start)).toBe(200)
+  // Since a later instant, only what a frame sent then waits.
+  expect(budget.longestWaitSince(clock.now)).toBe(50)
 })

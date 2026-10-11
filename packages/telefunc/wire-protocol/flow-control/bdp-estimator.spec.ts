@@ -152,14 +152,14 @@ describe('BdpEstimator', () => {
 
   /** A ping that waited `pingWait` behind the receiver's own data, and whose ack comes `rttMs` after it, with a window's
    *  worth arriving at once and, of what the wire delivers, only what `deliveredBefore` says after: the window held back
-   *  its sender, whose wire held `backlog` as its credit ran out. The receiver's frames waited `roundWait` at most in the
-   *  round. */
+   *  its sender, whose wire held `backlog` as its credit ran out. The receiver's frames waited `roundWait` at most since
+   *  the ping went out. */
   function heldBack(
     bdp: BdpEstimator,
     rttMs: number,
     { backlog = EMPTY, deliveredBefore = nothing, pingWait = 0, roundWait = 0 } = {},
   ) {
-    const sendWait = { startRound: () => pingWait, endRound: () => roundWait }
+    const sendWait = { waitNow: () => pingWait, longestWaitSince: () => roundWait }
     vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
     expect(bdp.onReceive(1, sendWait)).toBe(true)
     bdp.onReceive(bdp.byteWindow)
