@@ -36,7 +36,9 @@ function announcedNext(last: number, floor: number): number {
  *  `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at the floor, the rate the link carries at least by what its
  *  receiver took by an answer, a heartbeat or an acknowledged announcement. A smaller control frame, such as the
  *  handshake's, goes whole. On a link known slow, a larger frame sends one small piece as a probe, and the rest of it and
- *  every frame after it but a PIECES_ACK wait for its acknowledgement. */
+ *  every frame after it but a PIECES_ACK wait for its acknowledgement. With a rate measured, a data frame past `dataRoom`
+ *  goes in pieces as far as that goes, and its rest waits for `sendHeld`: the frames after it wait too, but those that
+ *  aren't data and go whole, as a window update does. */
 class PieceSender {
   /** The link is known to be too slow for big whole frames. */
   private slow = false
@@ -58,14 +60,18 @@ class PieceSender {
   private firstBytes = 0
   private firstAt = 0
   /** The bytes of the frames handed to the socket. */
-  private transmittedBytes = 0
+  transmittedBytes = 0
+  /** With a rate measured, the most bytes of data it hands the socket now; and what it calls with the bytes of data it
+   *  hands the socket. A page's `SendBudget` sets both. */
+  dataRoom = (): number => Number.POSITIVE_INFINITY
+  onData = (_bytes: number): void => {}
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
   private probe: { end: number; second: number | null } | null = null
-  /** On a link known slow, what waits for the probe's acknowledgement: the rest of its frame. */
+  /** The rest of a frame: on a link known slow, waiting for the probe's acknowledgement; else of data, for room. */
   private rest: { frame: Uint8Array<ArrayBuffer>; offset: number } | null = null
-  /** On a link known slow, the frames sent after the probe; else the frames of this task, announced at its end. */
+  /** The frames sent after the rest, but those that pass it; else the frames of this task, announced at its end. */
   private readonly held = new Fifo<Uint8Array<ArrayBuffer>>()
-  /** The bytes waiting for a probe's acknowledgement, or to be announced. */
+  /** The bytes waiting for a probe's acknowledgement or for room, or to be announced. */
   heldBytes = 0
   private announcing = false
   /** The bytes of the newest message it announced; each it announced and its receiver hasn't acknowledged: where it ends,
@@ -115,7 +121,7 @@ class PieceSender {
       if (!this.announces(frame)) return this.pass(frame)
       this.announcing = true
       queueMicrotask(this.announce)
-    }
+    } else if (this.passesRest(frame)) return this.pass(frame)
     this.held.push(frame)
     this.heldBytes += frame.byteLength
   }
@@ -130,37 +136,63 @@ class PieceSender {
     )
   }
 
+  /** Whether `frame`, sent while the rest of a data frame waits for room, goes ahead of it: a frame that isn't data and
+   *  goes whole, as a flow-control frame does. */
+  private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
+    return this.rest !== null && this.probe === null && !isSequencedTag(frame[0]!) && frame.byteLength <= this.wholeUpTo
+  }
+
   /** Hands the socket `frame`, whole or in pieces. */
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
     if (bytes > this.largest) this.largest = bytes
-    if (bytes > this.wholeUpTo) return this.cut(frame, 0)
-    this.transmittedBytes += bytes
+    if (bytes > this.wholeUpTo || (this.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.dataRoom()))
+      return this.cut(frame, 0)
+    this.transmitted(frame, bytes)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.transmit(frame)
   }
 
-  /** Hands the socket `frame` from `offset` in pieces. */
+  /** Hands the socket `frame` from `offset` in pieces, of data as far as `dataRoom` goes, and holds the rest. */
   private cut(frame: Uint8Array<ArrayBuffer>, offset: number): void {
     const bytes = frame.byteLength
     const now = performance.now()
-    // The first is empty: its receiver hears of the frame at once, and acknowledges its first two pieces at once.
-    if (offset === 0) this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
+    const end =
+      this.fastest > 0 && isSequencedTag(frame[0]!)
+        ? Math.min(bytes, offset + Math.max(0, Math.floor(this.dataRoom())))
+        : bytes
+    if (end === offset && this.fastest > 0) return this.hold(frame, offset)
+    // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
+    // two pieces at once. One cut only for room is no measure.
+    if (offset === 0 && bytes > this.wholeUpTo) this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
     if (this.fastest === 0) return this.sendSlowProbe(frame, now)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
-    this.transmittedBytes += bytes - offset
-    if (acknowledges(bytes)) this.track(bytes - offset, now, false)
-    for (let at = offset; at < bytes; at += size) this.transmit(encode.piece(bytes, frame.subarray(at, at + size)))
+    this.transmitted(frame, end - offset)
+    if (acknowledges(bytes)) this.track(end - offset, now, false)
+    for (let at = offset; at < end; at += size)
+      this.transmit(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
+    if (end < bytes) this.hold(frame, end)
+  }
+
+  /** Counts `bytes` of `frame` handed to the socket. */
+  private transmitted(frame: Uint8Array<ArrayBuffer>, bytes: number): void {
+    this.transmittedBytes += bytes
+    if (isSequencedTag(frame[0]!)) this.onData(bytes)
+  }
+
+  /** Holds `frame` from `offset`, for room or for the probe's acknowledgement. */
+  private hold(frame: Uint8Array<ArrayBuffer>, offset: number): void {
+    this.rest = { frame, offset }
+    this.heldBytes += frame.byteLength - offset
   }
 
   /** On a link known slow, sends the first piece of `frame` as a probe, and holds the rest. */
   private sendSlowProbe(frame: Uint8Array<ArrayBuffer>, now: number): void {
-    this.transmittedBytes += WIRE_PROBE_BYTES
+    this.transmitted(frame, WIRE_PROBE_BYTES)
     this.track(WIRE_PROBE_BYTES, now, true)
     this.transmit(encode.piece(frame.byteLength, frame.subarray(0, WIRE_PROBE_BYTES)))
     this.probe = { end: this.transmittedBytes, second: null }
-    this.rest = { frame, offset: WIRE_PROBE_BYTES }
-    this.heldBytes += frame.byteLength - WIRE_PROBE_BYTES
+    this.hold(frame, WIRE_PROBE_BYTES)
   }
 
   /** Announces the frames of this task, and sends them. */
@@ -191,7 +223,7 @@ class PieceSender {
       [0, WIRE_PROBE_FIRST_BYTES],
       [WIRE_PROBE_FIRST_BYTES, WIRE_PROBE_PAIR_BYTES],
     ] as const) {
-      this.transmittedBytes += size
+      this.transmitted(frame, size)
       this.track(size, now, true)
       this.sendAnnouncedMessage(encode.piece(bytes, frame.subarray(at, at + size)), size, this.transmittedBytes, now)
     }
@@ -206,7 +238,7 @@ class PieceSender {
   private sendAnnounced(frame: Uint8Array<ArrayBuffer>, offset: number, now: number): void {
     const bytes = frame.byteLength
     const start = this.transmittedBytes - offset
-    this.transmittedBytes += bytes - offset
+    this.transmitted(frame, bytes - offset)
     if (acknowledges(bytes)) this.track(bytes - offset, now, false)
     if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor))
       return this.sendAnnouncedMessage(frame, bytes, this.transmittedBytes, now)
@@ -358,7 +390,12 @@ class PieceSender {
     return this.fastest === 0 || at - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS
   }
 
-  /** On a link known slow, sends what waited for the probe, now that it measured a rate. */
+  /** Sends what waits for room, as far as `dataRoom` goes now. */
+  sendHeld(): void {
+    if (this.rest !== null && this.probe === null) this.release()
+  }
+
+  /** Sends what waited for the probe, now that it measured a rate, or for room. */
   private release(): void {
     const { frame, offset } = this.rest!
     this.rest = null

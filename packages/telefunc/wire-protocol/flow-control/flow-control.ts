@@ -1,7 +1,7 @@
 export { FlowControl, replayWindow }
 export type { FlowControlEmit }
 
-import { BdpEstimator } from './bdp-estimator.js'
+import { BdpEstimator, type SendWait } from './bdp-estimator.js'
 import { macrotaskYield } from './macrotask-yield.js'
 import {
   CREDIT_MSG_WINDOW_INITIAL,
@@ -106,11 +106,13 @@ class FlowControl {
   /** `backlog`: bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell.
    *  `yieldBytes`: the sender yields a macrotask once it sent that many bytes since it last yielded or waited. A page
    *  sets it: Chromium takes what a page queued on a WebSocket or an upload stream only between tasks, and woken by
-   *  credit, a page would send all of it in one. */
+   *  credit, a page would send all of it in one. `sendWait`: how long the frames that go at once wait behind the
+   *  channel's wire's own data, `null` where the runtime can't tell. */
   constructor(
     private readonly _emit: FlowControlEmit,
     private readonly _backlog: () => number | undefined,
     private readonly _yieldBytes = Infinity,
+    private readonly _sendWait: () => SendWait | null = () => null,
   ) {
     macrotaskYield.assertSupported()
   }
@@ -214,7 +216,7 @@ class FlowControl {
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
   onReceived(bytes: number): void {
     this._arrived = true
-    if (this._bdp.onReceive(bytes, this._backlog)) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `wire`, which the peer answers before
@@ -250,7 +252,7 @@ class FlowControl {
    *  queue (see `BdpEstimator`), AND our own self-utilisation is below threshold. On growth, the new limit goes out to
    *  the peer immediately. */
   onPingAck(probe: number, peerBacklog: number, peerPathRtt: number, deliveredBefore: (ms: number) => number): void {
-    const suggest = this._bdp.onPingAck(probe, peerBacklog, peerPathRtt, deliveredBefore)
+    const suggest = this._bdp.onPingAck(probe, peerBacklog, peerPathRtt, deliveredBefore, this._sendWait())
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'

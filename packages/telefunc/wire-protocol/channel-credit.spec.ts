@@ -1775,3 +1775,88 @@ test("a page's burst of sends its server acknowledges slower than they come read
     restore()
   }
 })
+
+/** A download of 64 KiB frames on a 20 MB/s downlink and a 10 ms round trip, with another channel the server sends a
+ *  timestamp every 250 ms, while `upload` sends on an uplink of `up` B/ms: over 20 s after 10 s, what the wire carried
+ *  down in MB/s and up in B/ms, and how long the other channel's messages took, sorted. */
+async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Array, never>) => () => void) {
+  const download = loop.open<never, Uint8Array>()
+  const other = loop.open<never, number>()
+  const { page } = loop.open<Uint8Array, never>()
+  download.page.listenBinary(() => {})
+  const waits: number[] = []
+  other.page.listen((sentAt) => void waits.push(Date.now() - sentAt))
+  await run(1_000)
+  const socket = loop.socket
+  socket.toServer.bytesPerMs = up
+  socket.toPage.bytesPerMs = 20_000
+  const wire = { measuring: false, down: 0, up: 0 }
+  const onmessage = socket.onmessage!
+  socket.onmessage = (event) => {
+    if (wire.measuring) wire.down += event.data.byteLength
+    onmessage(event)
+  }
+  const receive = loop.receive.bind(loop)
+  loop.receive = (from, frame) => {
+    if (from === socket && wire.measuring) wire.up += frame.byteLength
+    receive(from, frame)
+  }
+  void (async () => {
+    while (!download.server.isClosed) await download.server.sendBinary(new Uint8Array(64 * KIB))
+  })().catch(() => {})
+  const tick = setInterval(() => void other.server.send(Date.now()).catch(() => {}), 250)
+  const stop = upload(page)
+  await run(10_000)
+  waits.length = 0
+  wire.measuring = true
+  await run(20_000)
+  clearInterval(tick)
+  stop()
+  return { down: wire.down / 20_000 / 1_000, up: wire.up / 20_000, waits: waits.sort((a, b) => a - b) }
+}
+
+/** What the window's ends can cut off: a 64 KiB frame, in B/ms over the 20 s. */
+const CUT_FRAME = (64 * KIB) / 20_000
+
+// Main's growth rule, run in this harness: the wire's MB/s down and B/ms up, and the other channel's median and longest
+// wait in ms. Bursts offer `burst / every` at most, which main exceeds by catching up the backlog it built before.
+test.each([
+  [100, 95, 1_000, { down: 20.0006, up: 97.74, wait: 1_796, longest: 3_313 }],
+  [100, 190, 2_000, { down: 20.0006, up: 61.87, wait: 2_621, longest: 3_316 }],
+  [1_250, 2_400, 2_000, { down: 19.745, up: 1_229.22, wait: 1_314, longest: 3_313 }],
+  [100, 100, 2_000, { down: 20.0006, up: 51.64, wait: 2_637, longest: 3_316 }],
+  [1_250, 1_000, 2_000, { down: 20.0006, up: 512.43, wait: 2_726, longest: 3_316 }],
+])(
+  "on a %i B/ms uplink with bursts of %i KiB every %i ms, a 20 MB/s download carries 0.9 of what it does on main's growth rule, the bursts all they offer, and another channel's messages wait no longer",
+  async (up, burst, every, main) => {
+    const row = await downloadBeside(up, (page) => {
+      const timer = setInterval(() => void page.sendBinary(new Uint8Array(burst * KIB)).catch(() => {}), every)
+      return () => clearInterval(timer)
+    })
+    expect(row.down).toBeGreaterThanOrEqual(0.9 * main.down)
+    expect(row.up).toBeGreaterThanOrEqual(Math.min(main.up, (burst * KIB) / every) - CUT_FRAME)
+    expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
+    expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
+  },
+)
+
+test.each([
+  [100, 16, { down: 19.9055, up: 44.7, wait: 2_583, longest: 3_316 }],
+  [100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],
+  [1_250, 64, { down: 20.0006, up: 134.78, wait: 2_885, longest: 3_315 }],
+  [1_250, 16, { down: 20.0006, up: 79.1, wait: 2_886, longest: 3_316 }],
+])(
+  "on a %i B/ms uplink with an upload that awaits each %i KiB message, a 20 MB/s download and the upload carry what they do on main's growth rule, and another channel's messages wait no longer",
+  async (up, message, main) => {
+    const row = await downloadBeside(up, (page) => {
+      void (async () => {
+        while (!page.isClosed) await page.sendBinary(new Uint8Array(message * KIB))
+      })().catch(() => {})
+      return () => {}
+    })
+    expect(row.down).toBeGreaterThanOrEqual(main.down - CUT_FRAME / 1_000)
+    expect(row.up).toBeGreaterThanOrEqual(main.up - CUT_FRAME)
+    expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
+    expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
+  },
+)

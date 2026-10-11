@@ -43,6 +43,7 @@ import { PieceReceiver, PieceSender } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
+import type { SendWait } from '../flow-control/bdp-estimator.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
@@ -250,6 +251,8 @@ interface MuxConnection {
   bufferedAmount(): number
   /** The bytes the wire delivered in the `ms` before it last delivered: before a frame handled as it arrives. */
   deliveredBeforeLast(ms: number): number
+  /** How long the frames that go at once wait behind the wire's own data, `null` where it can't tell. */
+  sendWait(): SendWait | null
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -311,6 +314,8 @@ type ClientChannelTransport = {
   quietFor(): number
   /** The bytes its wire delivered in the `ms` before it last delivered, as its heartbeat tracks it: 0 without one. */
   deliveredBeforeLast(ms: number): number
+  /** How long the frames that go at once wait behind its wire's own data, `null` where it can't tell. */
+  sendWait(): SendWait | null
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>
   dispose(): void
@@ -867,6 +872,10 @@ class ClientConnection implements MuxConnection {
 
   deliveredBeforeLast(ms: number): number {
     return this.transport.deliveredBeforeLast(ms)
+  }
+
+  sendWait(): SendWait | null {
+    return this.transport.sendWait()
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -2079,6 +2088,11 @@ class WsTransport implements UpgradeTarget {
     this.pieces = pieces
     const budget = new SendBudget(sender)
     this.budget = budget
+    budget.onRoom = () => {
+      if (this.ws !== ws) return
+      budget.sendHeld()
+      this.onRoom(sender)
+    }
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
       this.heartbeat?.noteReceived((data as ArrayBuffer).byteLength, now)
@@ -2086,9 +2100,7 @@ class WsTransport implements UpgradeTarget {
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return
-        if (sender.heldBytes === 0) this.settleDrained()
-        this.owner._onTransportRoom(this)
+        if (budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) this.onRoom(sender)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -2106,6 +2118,12 @@ class WsTransport implements UpgradeTarget {
       this.owner._onTransportClosed(this, { rejectedByServer: !this.everOpened })
     }
     ws.onerror = () => {}
+  }
+
+  /** What its sender held may have gone. */
+  private onRoom(sender: PieceSender): void {
+    if (sender.heldBytes === 0) this.settleDrained()
+    this.owner._onTransportRoom(this)
   }
 
   hasWire(): boolean {
@@ -2128,6 +2146,10 @@ class WsTransport implements UpgradeTarget {
   sendRoom(): number {
     assert(this.budget)
     return this.budget.room
+  }
+
+  sendWait(): SendWait | null {
+    return this.budget
   }
 
   /** What its socket holds unsent, and what its piece sender holds for a probe. */
@@ -2763,6 +2785,10 @@ class SseTransport implements UpgradeSource {
 
   deliveredBeforeLast(ms: number): number {
     return this.heartbeat?.deliveredBefore(ms) ?? 0
+  }
+
+  sendWait(): null {
+    return null
   }
 
   drained(): Promise<void> {

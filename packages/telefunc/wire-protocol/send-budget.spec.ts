@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import {
   CREDIT_WINDOW_MAX_BYTES,
+  WIRE_PIECES_ACK_BYTES,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
   WIRE_QUEUE_DELAY_MS,
@@ -45,22 +46,24 @@ async function open() {
   return { budget, clock, exchange }
 }
 
-test('data goes out until the allowance is sent, and more as the server acknowledges it', async () => {
+// The server acknowledges what arrived once `WIRE_PIECES_ACK_BYTES` did, so that much may have arrived unacknowledged.
+test('data goes out until the allowance and what the server holds before it acknowledges are sent, and more as it acknowledges', async () => {
   const { budget } = await open()
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
   budget.send(data(40_000), 5_000)
-  expect(budget.room).toBeGreaterThan(0)
+  expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES + WIRE_PIECES_ACK_BYTES - 40_000)
+  budget.send(data(40_000), 5_000)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBeLessThan(0)
-  expect(budget.acknowledged(PROBE + 40_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(PROBE + 80_000, 0, 0)).toBe(true)
   expect(budget.room).toBeGreaterThan(0)
 })
 
 test('the frames that go at once count against the room, and are not dated', async () => {
   const { budget } = await open()
-  budget.send(flowControl(1_000), 5_000)
+  budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
-  expect(budget.acknowledged(PROBE + 1_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(PROBE + WIRE_PIECES_ACK_BYTES + 1_000, 0, 0)).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
@@ -68,8 +71,9 @@ test('the allowance grows by what each acknowledgement covers while no frame wai
   const { exchange } = await open()
   expect(exchange(32_000, 0)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 32_000)
   expect(exchange(32_000, 10)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 2 * 32_000)
-  let allowance = 0
-  for (let i = 0; i < 80; i++) allowance = exchange(1_000_000, 10)
+  // A frame past the room would go in pieces as the server acknowledges it: each takes the room, up to 1 MB.
+  let allowance = WIRE_SEND_AHEAD_MIN_BYTES + 2 * 32_000
+  for (let i = 0; i < 100; i++) allowance = exchange(Math.min(allowance, 1_000_000), 10)
   expect(allowance).toBe(CREDIT_WINDOW_MAX_BYTES)
 })
 
