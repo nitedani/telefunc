@@ -20,6 +20,7 @@ import {
 import { ChannelOverflowError } from './channel-errors.js'
 import { Fifo } from '../utils/Fifo.js'
 import { TAG, encode } from './shared-ws.js'
+import { SendBudget } from './send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 
@@ -1858,5 +1859,79 @@ test.each([
     expect(row.up).toBeGreaterThanOrEqual(main.up - CUT_FRAME)
     expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
     expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
+  },
+)
+
+/** A hidden tab: the timers the page's send budget sets wait `every` ms at least. */
+function throttlePacing(every: number): () => void {
+  const budget = SendBudget.prototype as unknown as { pace: () => void }
+  const pace = budget.pace
+  budget.pace = function (this: unknown) {
+    const setTimer = globalThis.setTimeout
+    globalThis.setTimeout = ((fn: () => void, ms = 0) => setTimer(fn, Math.max(every, ms))) as typeof setTimeout
+    try {
+      pace.call(this)
+    } finally {
+      globalThis.setTimeout = setTimer
+    }
+  }
+  return () => void (budget.pace = pace)
+}
+
+// The burst rows a hidden tab lost, the verifier's and the perturbed ones, with the page's timers at 1 Hz and never firing.
+test.each(
+  [1_000, 1e9].flatMap((throttle) =>
+    (
+      [
+        [100, 95, 1_000, { down: 20.0006, up: 97.74, wait: 1_796, longest: 3_313 }],
+        [1_250, 2_400, 2_000, { down: 19.745, up: 1_229.22, wait: 1_314, longest: 3_313 }],
+        [1_250, 1_000, 2_000, { down: 20.0006, up: 512.43, wait: 2_726, longest: 3_316 }],
+        [100, 85, 1_000, { down: 20.0006, up: 87.5, wait: 2_548, longest: 3_226 }],
+        [1_250, 900, 2_000, { down: 20.0006, up: 461.23, wait: 2_815, longest: 3_316 }],
+      ] as const
+    ).map(([up, burst, every, main]) => [up, burst, every, throttle, main] as const),
+  ),
+)(
+  "in a hidden tab, on a %i B/ms uplink with bursts of %i KiB every %i ms, the bursts carry all they offer beside a 20 MB/s download, with the page's timers waiting %i ms",
+  async (up, burst, every, throttle, main) => {
+    const restore = throttlePacing(throttle)
+    try {
+      const row = await downloadBeside(up, (page) => {
+        const timer = setInterval(() => void page.sendBinary(new Uint8Array(burst * KIB)).catch(() => {}), every)
+        return () => clearInterval(timer)
+      })
+      expect(row.down).toBeGreaterThanOrEqual(0.9 * main.down)
+      expect(row.up).toBeGreaterThanOrEqual(Math.min(main.up, (burst * KIB) / every) - CUT_FRAME)
+      expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
+      expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
+    } finally {
+      restore()
+    }
+  },
+)
+
+// The awaited rows a hidden tab lost, the verifier's and the perturbed ones, with the page's timers never firing.
+test.each([
+  [100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],
+  [100, 48, { down: 16.7234, up: 71.64, wait: 1_619, longest: 3_297 }],
+  [1_250, 24, { down: 20.0006, up: 97.52, wait: 2_886, longest: 3_316 }],
+])(
+  "in a hidden tab, on a %i B/ms uplink with an upload that awaits each %i KiB message, a 20 MB/s download and the upload carry what they do on main's growth rule, with the page's timers never firing",
+  async (up, message, main) => {
+    const restore = throttlePacing(1e9)
+    try {
+      const row = await downloadBeside(up, (page) => {
+        void (async () => {
+          while (!page.isClosed) await page.sendBinary(new Uint8Array(message * KIB))
+        })().catch(() => {})
+        return () => {}
+      })
+      expect(row.down).toBeGreaterThanOrEqual(main.down - CUT_FRAME / 1_000)
+      expect(row.up).toBeGreaterThanOrEqual(main.up - CUT_FRAME)
+      expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
+      expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
+    } finally {
+      restore()
+    }
   },
 )

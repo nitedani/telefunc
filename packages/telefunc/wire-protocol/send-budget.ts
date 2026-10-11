@@ -63,6 +63,7 @@ class SendBudget {
   private queued = 0
   private queuedAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
+  private paceDue = 0
   /** The longest a frame that went at once waited since the round started (see `SendWait`). */
   private longestWait = 0
   /** The room ran out while the uplink held data, since it last held none, and so since the round started: the uplink
@@ -107,6 +108,13 @@ class SendBudget {
     this.sender.sendHeld()
   }
 
+  /** A message arrived: where the timer is late to look again, looks now. A hidden tab throttles timers, not messages. */
+  received(): void {
+    if (this.paceTimer === null || performance.now() < this.paceDue) return
+    clearTimeout(this.paceTimer)
+    this.lookAgain()
+  }
+
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
   acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
     const before = this.sender.acknowledgedBytes
@@ -148,16 +156,15 @@ class SendBudget {
     if (this.drainRate === 0 || this.room > 0 || this.queued === 0) return
     this.limited = this.limitedInRound = true
     if (this.paceTimer !== null) return
-    this.paceTimer = unrefTimer(
-      setTimeout(
-        () => {
-          this.paceTimer = null
-          this.onRoom()
-          this.pace()
-        },
-        Math.max(1, Math.min(this.queued, WIRE_PIECES_ACK_BYTES) / this.drainRate),
-      ),
-    )
+    const ms = Math.max(1, Math.min(this.queued, WIRE_PIECES_ACK_BYTES) / this.drainRate)
+    this.paceDue = performance.now() + ms
+    this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
+  }
+
+  private readonly lookAgain = (): void => {
+    this.paceTimer = null
+    this.onRoom()
+    this.pace()
   }
 
   /** How long a frame handed to the socket now waits behind the data the uplink holds. */
