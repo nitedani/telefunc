@@ -464,10 +464,9 @@ describe('FlowControl — replay buffers', () => {
     flow.fitReplays(1024 * 1024, CREDIT_WINDOW_MAX_BYTES)
     expect(flow.byteWindow).toBe(1024 * 1024)
     flow.useBatchTransportInitial()
-    flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    flow.widenByteWindow()
     expect(flow.byteWindow).toBe(1024 * 1024)
     flow.fitReplays(4 * CREDIT_WINDOW_MAX_BYTES, CREDIT_WINDOW_MAX_BYTES)
-    flow.widenByteWindow(4 * CREDIT_WINDOW_MAX_BYTES)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_MAX_BYTES)
   })
 

@@ -117,7 +117,7 @@ class BdpEstimator {
   /** The round trip a round the window held back took, which a queue can't have lengthened, since the wire was
    *  replaced: lowered as the path's is. `Infinity` before. */
   private _boundRtt = Infinity
-  private _lastPingAt = 0
+  private _lastPingAt = Number.NEGATIVE_INFINITY
   /** How long the ping in flight waited behind this side's own data on its wire. */
   private _pingWait = 0
   /** What the next `growBytes` takes the byte window to where the last settled probe sized it, else 0: it doubles. */
@@ -160,7 +160,7 @@ class BdpEstimator {
     // Skip probe only when *both* axes have already hit their cap — otherwise one of them
     // might still want to grow.
     if (!this._pingInFlight && !(this._byteWindow >= this._byteWindowMax && this._msgWindow >= CREDIT_MSG_WINDOW_MAX)) {
-      const now = Date.now()
+      const now = performance.now()
       if (now - this._lastPingAt >= this._probeIntervalMs) {
         // Snapshot BEFORE crediting the triggering frame — it counts as the first
         // in-flight byte. Otherwise a window-bound producer always samples 0.
@@ -278,8 +278,8 @@ class BdpEstimator {
     this._grewSincePing = true
   }
 
-  /** Grow-only bump of the byte window (clamped to its cap). */
-  bumpInitialByteWindow(bytes: number): void {
+  /** Raises the byte window to `bytes`, within its cap; never lowers it. */
+  raiseByteWindow(bytes: number): void {
     const window = Math.min(this._byteWindowMax, bytes)
     if (window <= this._byteWindow) return
     this._byteWindow = window

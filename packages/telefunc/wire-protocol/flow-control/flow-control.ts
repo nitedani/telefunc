@@ -84,8 +84,8 @@ class FlowControl {
   private _uncountedBytes = 0
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
   private _arrived = false
-  /** The least byte window granted, past the estimator's (see `widenByteWindow`). */
-  private _byteWindowFloor = 0
+  /** It grants the largest byte window its peer's replay allows (see `widenByteWindow`). */
+  private _widened = false
   /** Senders waiting on credit, oldest first. */
   private readonly _waiters = new Fifo<() => void>()
   /** A waiter was handed the credit and no send was counted since. */
@@ -120,7 +120,7 @@ class FlowControl {
 
   /** Receiver-side: the byte window granted. */
   get byteWindow(): number {
-    return Math.max(this._bdp.byteWindow, Math.min(this._byteWindowFloor, this._bdp.byteWindowMax))
+    return this._widened ? this._bdp.byteWindowMax : this._bdp.byteWindow
   }
 
   get msgWindow(): number {
@@ -320,11 +320,11 @@ class FlowControl {
     this._advertiseMessages()
   }
 
-  /** Receiver-side: a byte window of at least `bytes`, advertised with the next limit, while limits still go out once a
-   *  quarter of the estimator's window was consumed: a broadcast's page, whose window sets how far behind the server
-   *  may have it, acknowledges what it read as often as a stream's does. */
-  widenByteWindow(bytes: number): void {
-    this._byteWindowFloor = bytes
+  /** Receiver-side: the largest byte window its peer's replay allows, advertised with the next limit, while limits still
+   *  go out once a quarter of the estimator's window was consumed: a broadcast's page, whose window sets how far behind
+   *  the server may have it, acknowledges what it read as often as a stream's does. */
+  widenByteWindow(): void {
+    this._widened = true
   }
 
   // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
@@ -347,7 +347,7 @@ class FlowControl {
   /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
   useBatchTransportInitial(): void {
     const prev = this.byteWindow
-    this._bdp.bumpInitialByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
+    this._bdp.raiseByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
     if (this.byteWindow > prev) this._advertiseBytes()
   }
 

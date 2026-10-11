@@ -236,9 +236,9 @@ class BufferLane {
     callback: EntryCallback | EntryCallback | null,
     order: number,
   ): void {
-    const overflowErr = new ChannelOverflowError()
     bytes += callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES
     if (bytes > this.#maxBytes) {
+      const overflowErr = new ChannelOverflowError()
       const dropsPublish = isPublishTag(tag) || this.#tags.slice(this.#head).some(isPublishTag)
       this.clear(overflowErr)
       if (dropsPublish) this.droppedPublish = true
@@ -251,7 +251,7 @@ class BufferLane {
     this.#callbacks.push(callback)
     this.#order.push(order)
     this.#totalBytes += bytes
-    this.#evict(overflowErr)
+    this.#evict()
   }
 
   clear(err?: Error): void {
@@ -280,13 +280,14 @@ class BufferLane {
 
   // ── Private ──
 
-  #evict(evictionErr: Error): void {
+  #evict(): void {
+    let evictionErr: ChannelOverflowError | undefined
     // Evict oldest entries until within the cap.
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
     while (this.#totalBytes > this.#maxBytes && this.#head < this.#data.length) {
       if (isPublishTag(this.#tags[this.#head]!)) this.droppedPublish = true
-      this.#callbacks[this.#head]?.reject(evictionErr)
+      this.#callbacks[this.#head]?.reject((evictionErr ??= new ChannelOverflowError()))
       this.#totalBytes -= this.#sizes[this.#head]!
       this.#head++
     }

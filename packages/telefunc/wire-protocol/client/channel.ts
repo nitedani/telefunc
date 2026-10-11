@@ -40,7 +40,6 @@ import { getSessionUrl } from './session-registry.js'
 import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_CLOSE_TIMEOUT_MS,
-  CREDIT_WINDOW_MAX_BYTES,
   FC_PAGE_YIELD_BYTES,
   CHANNEL_TRANSPORT,
   WIRE_MAX_RAW_FRAME_BYTES,
@@ -651,7 +650,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   constructor(...args: ConstructorParameters<typeof ClientChannel>) {
     super(...args)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
-    this._flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    this._flow.widenByteWindow()
   }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {

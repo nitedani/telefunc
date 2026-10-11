@@ -514,7 +514,7 @@ class PieceReceiver {
         ? 0
         : Math.round((this.newestDataAt! - this.acknowledgedDataAt) * 1000)
     this.acknowledgedDataAt = this.newestDataAt
-    // Rounded down: its sender then dates the arrival no earlier than it was, so the rate it takes is never higher
+    // Rounded down: its sender then dates the arrival no earlier than it was, and takes a rate no faster than the link's.
     this.send(encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt), span))
   }
 }
