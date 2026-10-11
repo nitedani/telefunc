@@ -22,6 +22,10 @@ class Fifo<T> {
     return this.length > 0 ? this.items[this.items.length - 1] : undefined
   }
 
+  *[Symbol.iterator](): Iterator<T> {
+    for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
+  }
+
   shift(): T | undefined {
     if (this.head === this.items.length) return undefined
     const item = this.items[this.head] as T

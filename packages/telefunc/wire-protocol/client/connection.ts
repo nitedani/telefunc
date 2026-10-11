@@ -74,12 +74,14 @@ import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../s
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { SSELineSplitter } from './SSELineSplitter.js'
 import { randomUuid } from '../../utils/randomUuid.js'
+import { Fifo } from '../../utils/Fifo.js'
 
 type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
   channelIx: number
   seq?: number
 }
+type SequencedFrame = BufferedFrame & { seq: number }
 
 /** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
  *  until the swap commits — typically driven via a transient Heartbeat. */
@@ -477,11 +479,14 @@ class ClientConnection implements MuxConnection {
   private carriedFrom = new Map<number, number>()
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
+  /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
   private sendBuffer: BufferedFrame[] = []
-  /** Channels whose frames in sendBuffer go, all in one pass when it's next read (see `queued`). */
+  /** Sequenced frames that wait only for the transport's room, in the order they go: what a channel that may send sends
+   *  next waits behind them. Moved to the front of sendBuffer once sends are held (see `queued`). */
+  private heldForRoom = new Fifo<SequencedFrame>()
+  private heldForRoomBytes = 0
+  /** Channels whose queued frames go, all in one pass when they're next read (see `queued`). */
   private droppedQueues = new Set<number>()
-  /** A channel that may send has a sequenced frame waiting in sendBuffer: what it sends next waits behind it. */
-  private holdsSendable = false
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
@@ -661,7 +666,7 @@ class ClientConnection implements MuxConnection {
 
   /** The transport may have room for data again: what waited for it goes. */
   _onTransportRoom(transport: ClientChannelTransport): void {
-    if (transport === this.transport && this.holdsSendable && this.sendsOpen) this.drainBufferedFramesToWire()
+    if (transport === this.transport && this.sendsOpen) this.sendHeldForRoom()
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -755,16 +760,37 @@ class ClientConnection implements MuxConnection {
   /** Sends a sequenced frame, or queues it where sends are held, or the transport has no room for data until its server
    *  acknowledges some (see `SendBudget`). The frames that go at once pass what waits. */
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
-    const open = this.canSendImmediately(ix)
-    // What it held goes first, once it has room.
-    if (open && this.holdsSendable && this.transport.sendRoom() > 0) this.drainBufferedFramesToWire()
-    if (open && !this.holdsSendable && this.transport.sendRoom() > 0) {
+    if (!this.canSendImmediately(ix)) {
+      this.queued().push({ frame, channelIx: ix, seq })
+      return
+    }
+    // What it held goes first.
+    this.sendHeldForRoom()
+    if (this.heldForRoom.length === 0 && this.transport.sendRoom() > 0) {
       this.replayBuffers.get(ix)!.push(seq, frame)
       this.transport.sendFrame({ kind, frame })
       return
     }
-    this.sendBuffer.push({ frame, channelIx: ix, seq })
-    if (open) this.holdsSendable = true
+    this.holdForRoom({ frame, channelIx: ix, seq })
+  }
+
+  private holdForRoom(entry: SequencedFrame): void {
+    this.heldForRoom.push(entry)
+    this.heldForRoomBytes += entry.frame.byteLength
+  }
+
+  /** What waits for room goes, from the front, while the transport has room. */
+  private sendHeldForRoom(): void {
+    if (this.heldForRoom.length === 0) return
+    this.dropQueues()
+    let room = this.transport.sendRoom()
+    while (room > 0 && this.heldForRoom.length > 0) {
+      const { frame, channelIx, seq } = this.heldForRoom.shift()!
+      this.heldForRoomBytes -= frame.byteLength
+      room -= frame.byteLength
+      this.replayBuffers.get(channelIx)!.push(seq, frame)
+      this.transport.sendFrame({ kind: 'reconcile', frame })
+    }
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -824,9 +850,7 @@ class ClientConnection implements MuxConnection {
   }
 
   bufferedAmount(): number {
-    let held = 0
-    if (this.holdsSendable) for (const { frame, seq } of this.queued()) if (seq !== undefined) held += frame.byteLength
-    return this.transport.bufferedAmount() + held
+    return this.transport.bufferedAmount() + this.heldForRoomBytes
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -834,7 +858,7 @@ class ClientConnection implements MuxConnection {
    *  to advertise it again. */
   private sendFlowControl(ix: number, frame: Uint8Array<ArrayBuffer>, urgent = false): void {
     if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      this.queued().push({ frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: urgent ? 'urgent-flow-control' : 'flow-control', frame })
@@ -845,7 +869,7 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const frame = encode.broadcastSub(ix, binary)
     if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      this.queued().push({ frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: 'control', frame })
@@ -856,7 +880,7 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const frame = encode.broadcastUnsub(ix, binary)
     if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
+      this.queued().push({ frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind: 'control', frame })
@@ -1035,7 +1059,7 @@ class ClientConnection implements MuxConnection {
       if (
         state.reported &&
         this.replayBuffers.get(ix)!.length === 0 &&
-        !(queuedIxes ??= new Set(this.queued().map(({ channelIx }) => channelIx))).has(ix)
+        !(queuedIxes ??= new Set([...this.queued(), ...this.heldForRoom].map(({ channelIx }) => channelIx))).has(ix)
       ) {
         this.releaseChannel(ix, entry.channel)
         continue
@@ -1433,7 +1457,14 @@ class ClientConnection implements MuxConnection {
   /** On a live wire once no channel is open and nothing is queued: a closed one's frames went out, and what the
    *  transport holds leaves before the wire does. */
   private startTtlIfIdle(): void {
-    if (!this.connected || this.ttl || this.queued().length > 0 || this.openChannelCount() > 0) return
+    if (
+      !this.connected ||
+      this.ttl ||
+      this.queued().length > 0 ||
+      this.heldForRoom.length > 0 ||
+      this.openChannelCount() > 0
+    )
+      return
     const ttl = setTimeout(() => {
       void this.transport.drained().then(() => {
         if (this.ttl === ttl && this.openChannelCount() === 0) this.dispose()
@@ -1477,6 +1508,8 @@ class ClientConnection implements MuxConnection {
     this.channels.clear()
     this.channelIndex.clear()
     this.sendBuffer = []
+    this.heldForRoom = new Fifo()
+    this.heldForRoomBytes = 0
     this.droppedQueues.clear()
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
@@ -1752,13 +1785,12 @@ class ClientConnection implements MuxConnection {
     return 'accept'
   }
 
-  /** Takes out what the channels `releasable` accepts queued, storing what replays in their replays. What the others
-   *  queued stays. */
+  /** Takes out what the channels `releasable` accepts queued, storing what replays in their replays. Once the room is
+   *  used, their sequenced frames wait for room behind what already does. What the others queued stays. */
   private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.queued()
     let room = this.transport.sendRoom()
-    let holdsSendable = false
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
@@ -1767,15 +1799,11 @@ class ClientConnection implements MuxConnection {
       const seq = entry.seq
       if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
-        // What a channel that may send still holds goes before what it sends next.
-        if (seq !== undefined && this.isSendable(channelIx)) holdsSendable = true
         continue
       }
       if (seq !== undefined) {
-        // Once the room is used, it is for the frames after: a channel's stay in order.
-        if (room <= 0) {
-          sendBuffer[writeIx++] = entry
-          holdsSendable = true
+        if (room <= 0 || this.heldForRoom.length > 0) {
+          this.holdForRoom({ frame, channelIx, seq })
           continue
         }
         room -= frame.byteLength
@@ -1784,7 +1812,6 @@ class ClientConnection implements MuxConnection {
       frames.push({ kind: 'reconcile', frame })
     }
     sendBuffer.length = writeIx
-    this.holdsSendable = holdsSendable
     return frames
   }
 
@@ -1798,15 +1825,32 @@ class ClientConnection implements MuxConnection {
     const replayBuffer = this.replayBuffers.get(ix)
     replayBuffer?.dispose()
     this.replayBuffers.delete(ix)
-    if (this.sendBuffer.length > 0) this.droppedQueues.add(ix)
+    if (this.sendBuffer.length > 0 || this.heldForRoom.length > 0) this.droppedQueues.add(ix)
   }
 
+  /** sendBuffer, with what waited for room in front of it once sends are held: a reconcile takes them all in order. */
   private queued(): BufferedFrame[] {
-    if (this.droppedQueues.size > 0) {
-      this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !this.droppedQueues.has(channelIx))
-      this.droppedQueues.clear()
+    this.dropQueues()
+    if (!this.sendsOpen && this.heldForRoom.length > 0) {
+      this.sendBuffer = [...this.heldForRoom, ...this.sendBuffer]
+      this.heldForRoom = new Fifo()
+      this.heldForRoomBytes = 0
     }
     return this.sendBuffer
+  }
+
+  private dropQueues(): void {
+    if (this.droppedQueues.size === 0) return
+    const dropped = this.droppedQueues
+    this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !dropped.has(channelIx))
+    if (this.heldForRoom.length > 0) {
+      const kept = new Fifo<SequencedFrame>()
+      for (const entry of this.heldForRoom)
+        if (dropped.has(entry.channelIx)) this.heldForRoomBytes -= entry.frame.byteLength
+        else kept.push(entry)
+      this.heldForRoom = kept
+    }
+    this.droppedQueues = new Set()
   }
 }
 

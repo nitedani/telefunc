@@ -18,6 +18,7 @@ import {
   WIRE_PROBE_BYTES,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
+import { Fifo } from '../utils/Fifo.js'
 import { TAG, encode } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
@@ -1645,3 +1646,58 @@ test.each([
     expect(got).toEqual(Array.from({ length: count }, (_, n) => n))
   },
 )
+
+/** Counts the entries `page`'s connection reads from the frames it holds back, and from every `Fifo`. */
+function countQueueReads(page: unknown) {
+  const reads = { count: 0 }
+  const connection = (page as { _connection: { sendBuffer: unknown[] } })._connection
+  const counting = (queue: unknown[]) =>
+    new Proxy(queue, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) reads.count++
+        return Reflect.get(target, key, receiver)
+      },
+    })
+  let sendBuffer = counting(connection.sendBuffer)
+  Object.defineProperty(connection, 'sendBuffer', {
+    get: () => sendBuffer,
+    set: (queue: unknown[]) => void (sendBuffer = counting(queue)),
+  })
+  const fifo = Fifo.prototype as unknown as Record<PropertyKey, (...args: unknown[]) => unknown>
+  const methods = { shift: fifo.shift!, peek: fifo.peek!, peekLast: fifo.peekLast! }
+  const iterate = fifo[Symbol.iterator]!
+  for (const name of ['shift', 'peek', 'peekLast'] as const)
+    fifo[name] = function (this: unknown) {
+      reads.count++
+      return methods[name].call(this)
+    }
+  fifo[Symbol.iterator] = function* (this: unknown) {
+    for (const item of iterate.call(this) as Iterable<unknown>) {
+      reads.count++
+      yield item
+    }
+  }
+  const restore = () => Object.assign(fifo, methods, { [Symbol.iterator]: iterate })
+  return { reads, restore }
+}
+
+test("a page's burst of sends its server acknowledges slower than they come reads each one it holds back a few times, however long the burst", async () => {
+  const { server, page } = loop.open<Uint8Array, never>()
+  let got = 0
+  server.listenBinary(() => void got++)
+  await run(100)
+  const { reads, restore } = countQueueReads(page)
+  try {
+    const message = new Uint8Array(2 * KIB)
+    for (const n of [10_000, 100_000]) {
+      got = 0
+      reads.count = 0
+      for (let i = 0; i < n; i++) void page.sendBinary(message)
+      await runUntil(() => got === n, 600_000)
+      expect(got).toBe(n)
+      expect(reads.count / n, `reads per message in a burst of ${n}`).toBeLessThan(8)
+    }
+  } finally {
+    restore()
+  }
+})
