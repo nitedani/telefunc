@@ -1819,7 +1819,8 @@ test("a page's burst of sends its server acknowledges slower than they come read
 /** A download of 64 KiB frames on a 20 MB/s downlink and a 10 ms round trip, with another channel the server sends a
  *  timestamp every 250 ms, while `upload` sends on an uplink of `up` B/ms: over 20 s after 10 s, what the wire carried
  *  down in MB/s and up in B/ms, and how long the other channel's messages took, sorted. */
-async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Array, never>) => () => void) {
+/** Measures `ms` after 10 s: a whole number of an upload's periods, so the frames on the wire at its ends match. */
+async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Array, never>) => () => void, ms = 20_000) {
   const download = loop.open<never, Uint8Array>()
   const other = loop.open<never, number>()
   const { page } = loop.open<Uint8Array, never>()
@@ -1849,10 +1850,10 @@ async function downloadBeside(up: number, upload: (page: ClientChannel<Uint8Arra
   await run(10_000)
   waits.length = 0
   wire.measuring = true
-  await run(20_000)
+  await run(ms)
   clearInterval(tick)
   stop()
-  return { down: wire.down / 20_000 / 1_000, up: wire.up / 20_000, waits: waits.sort((a, b) => a - b) }
+  return { down: wire.down / ms / 1_000, up: wire.up / ms, waits: waits.sort((a, b) => a - b) }
 }
 
 /** What the window's ends can cut off: a 64 KiB frame, in B/ms over the 20 s. */
@@ -1873,10 +1874,14 @@ test.each([
 ])(
   "on a %i B/ms uplink with bursts of %i KiB every %i ms, a 20 MB/s download carries 0.9 of what it does on main's growth rule, the bursts all they offer, and another channel's messages wait no longer",
   async (up, burst, every, main) => {
-    const row = await downloadBeside(up, (page) => {
-      const timer = setInterval(() => void page.sendBinary(new Uint8Array(burst * KIB)).catch(() => {}), every)
-      return () => clearInterval(timer)
-    })
+    const row = await downloadBeside(
+      up,
+      (page) => {
+        const timer = setInterval(() => void page.sendBinary(new Uint8Array(burst * KIB)).catch(() => {}), every)
+        return () => clearInterval(timer)
+      },
+      Math.round(20_000 / every) * every,
+    )
     expect(row.down).toBeGreaterThanOrEqual(0.9 * main.down)
     expect(row.up).toBeGreaterThanOrEqual(Math.min(main.up, (burst * KIB) / every))
     expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
