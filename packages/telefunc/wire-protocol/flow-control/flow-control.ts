@@ -13,6 +13,7 @@ import {
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
 import { Fifo } from '../../utils/Fifo.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
  *  arrived (see `constants.ts`). */
@@ -83,6 +84,8 @@ class FlowControl {
   /** What had been consumed when the last urgent limit was emitted. */
   private _urgentBytes = 0
   private _urgentMessages = 0
+  /** Waits for the wire's share to refresh the limits a quarter window of consumption made due (see `Link.refreshes`). */
+  private _refreshTimer: ReturnType<typeof setTimeout> | null = null
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private _uncountedBytes = 0
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
@@ -233,7 +236,8 @@ class FlowControl {
 
   /** Receiver-side: account post-callback consumption of one frame. Emits
    *  refresh `WINDOW` / `MSG_WINDOW` frames once a quarter of the estimator's
-   *  byte window, or of the message window, has been consumed since that limit last went out. */
+   *  byte window, or of the message window, has been consumed since that limit last went out, and the wire's share of
+   *  the uplink allows one. */
   onConsumed(bytes: number): void {
     this._consume(bytes, 1)
   }
@@ -362,14 +366,33 @@ class FlowControl {
   shutdown(): void {
     if (this._shutdown) return
     this._shutdown = true
+    if (this._refreshTimer !== null) clearTimeout(this._refreshTimer)
     this._tryWakeCreditWaiters()
   }
 
   private _consume(bytes: number, messages: number): void {
     this._consumedBytes += bytes
     this._consumedMessages += messages
-    if (this._consumedBytes - this._advertisedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes()
-    if (this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2) this._advertiseMessages()
+    this._refresh()
+  }
+
+  private _refresh(): void {
+    const bytes = this._consumedBytes - this._advertisedBytes >= this._bdp.byteWindow >> 2
+    const messages = this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2
+    if (!bytes && !messages) return
+    const wait = this._link?.refreshes.wait() ?? 0
+    if (wait > 0) {
+      this._link!.noteWait(wait)
+      this._refreshTimer ??= unrefTimer(
+        setTimeout(() => {
+          this._refreshTimer = null
+          this._refresh()
+        }, wait),
+      )
+      return
+    }
+    if (bytes) this._advertiseBytes()
+    if (messages) this._advertiseMessages()
   }
 
   private _advertiseBytes(): void {

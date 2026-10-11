@@ -227,6 +227,11 @@ export const WIRE_SEND_ACK_GAP_MS = 10
 export const WIRE_SEND_ACK_MS = 25
 /** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
+/** The most of the rate a page's uplink carries its acknowledgements of what it receives take, and its window
+ *  refreshes: each waits its turn, so on a slow uplink beside a fast download they leave 99% to what it uploads. A
+ *  refresh moves the download's credit, an acknowledgement only its sender's measures. */
+export const WIRE_ACK_SHARE = 0.0025
+export const WIRE_REFRESH_SHARE = 0.0075
 /** A data frame cut for room waits for this much of it, or what is left of the frame: smaller pieces spend a slow
  *  uplink on their headers. */
 export const WIRE_ROOM_PIECE_MIN_BYTES = 2 * 1024

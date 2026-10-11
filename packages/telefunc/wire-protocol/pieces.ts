@@ -116,8 +116,13 @@ class PieceSender {
       this.pingInterval = pingInterval
       this.setWholeUpTo()
     }
-    // A PIECES_ACK passes what waits: the probe its peer waits on may be its own.
-    if (frame[0] === TAG.PIECES_ACK) return this.pass(frame)
+    const tag = frame[0]!
+    if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.link.refreshes.handed(frame.byteLength)
+    if (tag === TAG.PIECES_ACK) {
+      this.link.acks.handed(frame.byteLength)
+      // It passes what waits: the probe its peer waits on may be its own.
+      return this.pass(frame)
+    }
     if (this.rest === null && !this.announcing) {
       if (!this.announces(frame)) return this.pass(frame)
       this.announcing = true
@@ -396,9 +401,10 @@ class PieceSender {
  *  are waited for at the rate their newest message came at, dated apart from the message before it. A receiver whose peer
  *  holds data back by what it acknowledges (`peerHoldsBack`: the server's, see `SendBudget`) acknowledges each announced
  *  message, as its peer's PINGs wait behind them, once more than `WIRE_PIECES_ACK_BYTES` of frames of any size are
- *  unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`, and data within `WIRE_SEND_ACK_MS`. Any other acknowledges when a frame over
- *  `WIRE_PIECES_ACK_BYTES` or the last of an announcement arrived, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`:
- *  all a sender needs that cuts its pieces by the rate it measures, and stops announcing by the rate it carries. */
+ *  unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`, and data within `WIRE_SEND_ACK_MS`. Any other
+ *  acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` or the last of an announcement arrived, at most one PIECES_ACK
+ *  per `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them allows one (`link`, see `Link.acks`): all a
+ *  sender needs that cuts its pieces by the rate it measures, and stops announcing by the rate it carries. */
 class PieceReceiver {
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
@@ -427,7 +433,8 @@ class PieceReceiver {
 
   constructor(
     private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
-    private readonly options: { peerHoldsBack: boolean },
+    /** `link`: the page's wire, whose share for acknowledgements they wait for. */
+    private readonly options: { peerHoldsBack: boolean; link?: Link },
   ) {}
 
   /** After a whole frame of `bytes` arrived at `at` in one message. A data frame dates the ack's span: it takes the
@@ -528,8 +535,10 @@ class PieceReceiver {
   }
 
   private acknowledgeSoon(): void {
-    const wait =
-      this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt
+    const wait = Math.max(
+      this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt,
+      this.options.link?.acks.wait() ?? 0,
+    )
     if (wait <= 0) this.acknowledge()
     else this.acknowledgeIn(wait)
   }

@@ -1910,6 +1910,39 @@ test("on a 1250 B/ms uplink with bursts of 2400 KiB every 2000 ms beside a 20 MB
   expect(idle).toBe(0)
 })
 
+// What a page sends about what it receives shares its uplink with what it uploads.
+test("on a 10 B/ms uplink the page measured, a 20 MB/s download's acknowledgements and window refreshes take at most 1% of it, and the download keeps its rate", async () => {
+  const download = loop.open<never, Uint8Array>()
+  const { page, server } = loop.open<Uint8Array, never>()
+  download.page.listenBinary(() => {})
+  server.listenBinary(() => {})
+  await run(1_000)
+  const socket = loop.socket
+  socket.toServer.bytesPerMs = 10
+  socket.toPage.bytesPerMs = 20_000
+  await page.sendBinary(new Uint8Array(16 * KIB))
+  const wire = { measuring: false, down: 0, control: 0 }
+  const onmessage = socket.onmessage!
+  socket.onmessage = (event) => {
+    if (wire.measuring) wire.down += event.data.byteLength
+    onmessage(event)
+  }
+  const control: number[] = [TAG.PIECES_ACK, TAG.WINDOW, TAG.MSG_WINDOW]
+  const receive = loop.receive.bind(loop)
+  loop.receive = (from, frame) => {
+    if (from === socket && wire.measuring && control.includes(frame[0]!)) wire.control += frame.byteLength
+    receive(from, frame)
+  }
+  void (async () => {
+    while (!download.server.isClosed) await download.server.sendBinary(new Uint8Array(64 * KIB))
+  })().catch(() => {})
+  await run(10_000)
+  wire.measuring = true
+  await run(20_000)
+  expect(wire.control / 20_000).toBeLessThanOrEqual(0.01 * 10)
+  expect(wire.down / 20_000 / 1_000).toBeGreaterThanOrEqual(19.9)
+})
+
 test.each([
   [100, 16, { down: 19.9055, up: 44.7, wait: 2_583, longest: 3_316 }],
   [100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],

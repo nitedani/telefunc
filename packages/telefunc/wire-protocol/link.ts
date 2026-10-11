@@ -1,7 +1,7 @@
 export { Link }
 export type { SendWait }
 
-import { WIRE_PIECE_RATE_WINDOW_MS } from './constants.js'
+import { WIRE_ACK_SHARE, WIRE_PIECE_RATE_WINDOW_MS, WIRE_REFRESH_SHARE } from './constants.js'
 import { Fifo } from '../utils/Fifo.js'
 
 /** The least span of arrivals a rate the peer took data at is measured over: a frame arrives whole, so a shorter span
@@ -23,7 +23,8 @@ type SendWait = {
 /** One wire, as this side knows it, and every channel on it reads the same: the path's round trip, which an attach's
  *  probe measures; the rate the link carries, as the piece cutter measures it, and the least it carries; and on a page's
  *  WebSocket, the rate the server takes data at, what the uplink holds at that rate, how long the frames that go at
- *  once waited behind it, and how long what the server sends waits behind what the page's credit let it send. */
+ *  once waited behind it, how long what the server sends waits behind what the page's credit let it send, and when the
+ *  page's next acknowledgement or window refresh may go. */
 class Link implements SendWait {
   /** The least round trip an attach's probe or a later ping took on this wire, `Infinity` before a probe's answer. */
   pathRtt = Number.POSITIVE_INFINITY
@@ -61,6 +62,10 @@ class Link implements SendWait {
   private deliveredAt = Number.NEGATIVE_INFINITY
   /** The span being measured started as the one before it ended, not after a pause. */
   private deliveryGoesOn = false
+  /** The acknowledgements and the window refreshes of what this side receives, each kind within its share of the rate
+   *  the link carries. */
+  readonly acks = new Share(this, WIRE_ACK_SHARE)
+  readonly refreshes = new Share(this, WIRE_REFRESH_SHARE)
 
   /** The channels on this wire granted the peer `bytes` more credit: it reaches it once what the uplink holds drained. */
   granted(bytes: number): void {
@@ -197,6 +202,28 @@ class Link implements SendWait {
   /** Notes a wait seen now: what a frame that goes at once waits, or what data waited. */
   noteWait(wait: number): void {
     this.waits.note(wait, performance.now())
+  }
+}
+
+/** Frames of one kind that take at most `share` of the rate their link carries (`Link.fastest`): each waits its turn, none
+ *  before a rate is measured. */
+class Share {
+  private at = 0
+
+  constructor(
+    private readonly link: Link,
+    private readonly share: number,
+  ) {}
+
+  /** How long a frame of the kind sent now waits. */
+  wait(): number {
+    return Math.max(0, this.at - performance.now())
+  }
+
+  /** Notes a frame of the kind, of `bytes`, handed to the socket. */
+  handed(bytes: number): void {
+    if (this.link.fastest === 0) return
+    this.at = Math.max(performance.now(), this.at) + bytes / (this.share * this.link.fastest)
   }
 }
 

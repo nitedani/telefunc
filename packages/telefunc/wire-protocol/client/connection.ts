@@ -2086,7 +2086,7 @@ class WsTransport implements UpgradeTarget {
     return {
       link,
       budget,
-      pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), { peerHoldsBack: false }),
+      pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), { peerHoldsBack: false, link }),
     }
   }
 
