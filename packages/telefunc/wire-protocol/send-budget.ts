@@ -3,6 +3,7 @@ export { SendBudget }
 import { CREDIT_WINDOW_MAX_BYTES, WIRE_QUEUE_DELAY_MS, WIRE_SEND_AHEAD_MIN_BYTES } from './constants.js'
 import type { PieceSender } from './pieces.js'
 import { isSequencedTag } from './shared-ws.js'
+import { Fifo } from '../utils/Fifo.js'
 
 /** How much of the excess queue a round of acknowledgements sheds. */
 const SHED_SHARE = 0.5
@@ -21,7 +22,7 @@ const SHED_SHARE = 0.5
 class SendBudget {
   private allowance = WIRE_SEND_AHEAD_MIN_BYTES
   /** The data frames sent and not covered by an acknowledgement: the bytes sent through each, and when. */
-  private readonly sent: { end: number; at: number }[] = []
+  private readonly sent = new Fifo<{ end: number; at: number }>()
   /** In ms, the server's clock from the first data frame an acknowledgement covered. */
   private arrivedAt = 0
   /** The least one-way delay of a data frame, up to the offset between the clocks. */
@@ -36,7 +37,7 @@ class SendBudget {
     // Frames sent within a ms of one another make one sample, dated by the first.
     const end = this.sender.sentBytes
     const at = performance.now()
-    const last = this.sent.at(-1)
+    const last = this.sent.peekLast()
     if (last !== undefined && at - last.at < 1) last.end = end
     else this.sent.push({ end, at })
   }
@@ -53,12 +54,10 @@ class SendBudget {
     const acknowledged = this.sender.acknowledgedBytes
     const newly = acknowledged - before
     this.arrivedAt += spanUs / 1000
-    let covered = 0
-    while (covered < this.sent.length && this.sent[covered]!.end <= acknowledged) covered++
+    let newest: { end: number; at: number } | undefined
+    while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     // It covered no data frame.
-    if (covered === 0) return true
-    const newest = this.sent[covered - 1]!
-    this.sent.splice(0, covered)
+    if (newest === undefined) return true
     const delay = this.arrivedAt - newest.at
     // A delay that stays over the target with the least allowance is the path's: it rose.
     const atLeast = this.allowance === WIRE_SEND_AHEAD_MIN_BYTES

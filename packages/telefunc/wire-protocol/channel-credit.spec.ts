@@ -1224,7 +1224,7 @@ test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last
     // The server acknowledges at most every `WIRE_SEND_ACK_GAP_MS`, the page every `WIRE_PIECES_ACK_GAP_MS`.
     expect(acks.length).toBeLessThan(side === 'server' ? 20 : 5)
   }
-  const sender = piecesOf(loop.socket)?.sender as { unacknowledged: unknown[] }
+  const sender = piecesOf(loop.socket)?.sender as { unacknowledged: { length: number } }
   expect(sender.unacknowledged).toHaveLength(0)
   expect(loop.sockets).toHaveLength(1)
 })

@@ -17,6 +17,11 @@ class Fifo<T> {
     return this.items[this.head]
   }
 
+  /** The newest item. */
+  peekLast(): T | undefined {
+    return this.length > 0 ? this.items[this.items.length - 1] : undefined
+  }
+
   shift(): T | undefined {
     if (this.head === this.items.length) return undefined
     const item = this.items[this.head] as T

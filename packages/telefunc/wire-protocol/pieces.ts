@@ -43,7 +43,15 @@ class PieceSender {
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
    *  arrived, when it was sent, the bytes sent through it, whether it was a probe's, and whether it was cut by no rate
    *  or a lapsed one. */
-  private readonly unacknowledged: { crossing: number; at: number; end: number; probe: boolean; blind: boolean }[] = []
+  private readonly unacknowledged = new Fifo<{
+    crossing: number
+    at: number
+    end: number
+    probe: boolean
+    blind: boolean
+  }>()
+  /** How many of them were cut by no rate or a lapsed one. */
+  private blindUnacknowledged = 0
   /** The bytes of the frames sent in all, and those the receiver has acknowledged; the first's, and when it was sent. */
   sentBytes = 0
   acknowledgedBytes = 0
@@ -230,12 +238,14 @@ class PieceSender {
   private track(crossingBytes: number, at: number, probe: boolean): void {
     // What its socket holds unsent crosses before it; a browser may count the message it is sending in full, so less the
     // largest frame.
+    const blind = this.lapsed(at)
+    if (blind) this.blindUnacknowledged++
     this.unacknowledged.push({
       crossing: Math.max(0, this.queued() - this.largest) + crossingBytes,
       at,
       end: this.transmittedBytes,
       probe,
-      blind: this.lapsed(at),
+      blind,
     })
   }
 
@@ -273,7 +283,7 @@ class PieceSender {
 
   /** Whether its receiver hasn't acknowledged a probe, or a frame cut by a lapsed rate. */
   get stalled(): boolean {
-    return this.unacknowledged.some((sent) => sent.blind)
+    return this.blindUnacknowledged > 0
   }
 
   /** Takes a PIECES_ACK: its receiver took `bytes` of the frames in all (mod 2^32), the newest `heldMs` before it sent
@@ -300,10 +310,9 @@ class PieceSender {
       // What it acknowledged went no earlier than the oldest and arrived by the newest: at most the link's rate.
       this.raiseFloor((end - oldest.start) / Math.max(arrived - oldest.at, WIRE_PROBE_CLOCK_MS))
     }
-    let covered = 0
-    while (covered < this.unacknowledged.length && this.unacknowledged[covered]!.end <= this.acknowledgedBytes)
-      covered++
-    for (const sent of this.unacknowledged.splice(0, covered)) {
+    while (this.unacknowledged.length > 0 && this.unacknowledged.peek()!.end <= this.acknowledgedBytes) {
+      const sent = this.unacknowledged.shift()!
+      if (sent.blind) this.blindUnacknowledged--
       // Within one tick of a coarsened clock a sample says nothing of the rate, but a probe's, which is small: it
       // crossed within a tick.
       if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
