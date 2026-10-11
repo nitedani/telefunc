@@ -16,6 +16,7 @@ import {
   type ReconciledPayload,
   seqNear,
   seqThrough,
+  withTook,
 } from './shared-ws.js'
 import {
   CHANNEL_TRANSPORT,
@@ -237,19 +238,30 @@ describe('heartbeat', () => {
       { ix: 3, lastSeq: 7 },
       { ix: 65_535, lastSeq: 2 ** 31 - 1 },
     ]
-    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended })
-    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [] })
+    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended, took: 0 })
+    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [], took: 0 })
     const answers = [
       { ix: 3, lastSeq: 5 },
       { ix: 4, lastSeq: null },
     ]
-    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers })
+    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers, took: 0 })
+  })
+
+  test('a PING or PONG says what its sender took of the frames its WebSocket carried, mod 2^32', () => {
+    expect(clientFrame(withTook(encode.ping(), 2 ** 32 - 1))).toEqual({ tag: TAG.PING, ended: [], took: 2 ** 32 - 1 })
+    const answers = [{ ix: 4, lastSeq: null }]
+    expect(decode(withTook(encode.pong(answers), 4_100))).toEqual({ tag: TAG.PONG, ended: answers, took: 4_100 })
   })
 
   test('a PING whose payload splits an entry is a violation', () => {
     const ragged = encode.ping([{ ix: 1, lastSeq: 1 }]).slice(0, 12)
     expect(() => clientFrame(ragged)).toThrow(ProtocolViolationError)
   })
+})
+
+test('an ANNOUNCE names the bytes that follow it, and the bytes per ms its sender knows the link carries at least', () => {
+  expect(clientFrame(encode.announce(4_000, 1_250))).toEqual({ tag: TAG.ANNOUNCE, bytes: 4_000, floor: 1.25 })
+  expect(clientFrame(encode.announce(4_000, 0))).toEqual({ tag: TAG.ANNOUNCE, bytes: 4_000, floor: 0 })
 })
 
 describe('decodeClientFrame — direction', () => {

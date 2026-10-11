@@ -56,6 +56,7 @@ import {
   payloadBytes,
   seqNear,
   seqThrough,
+  withTook,
 } from '../shared-ws.js'
 import type {
   AckResultStatus,
@@ -106,7 +107,7 @@ class Heartbeat {
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
   private lastReceivedAt = 0
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
-  private expectedBy = 0
+  private expectedBy = () => 0
 
   constructor(
     readonly intervalMs: number,
@@ -132,14 +133,14 @@ class Heartbeat {
     this.lastReceivedAt = at
   }
 
-  expectUntil(at: number): void {
-    this.expectedBy = at
+  expectFrom(expectedBy: () => number): void {
+    this.expectedBy = expectedBy
   }
 
   /** How long the wire has delivered nothing, since the heartbeat started or got a PONG if later, less the time it may
    *  take past the deadline to deliver what it still carries. */
   quietFor(): number {
-    return performance.now() - Math.max(this.lastReceivedAt, this.expectedBy - this.pongTimeoutMs)
+    return performance.now() - Math.max(this.lastReceivedAt, this.expectedBy() - this.pongTimeoutMs)
   }
 
   private armPongDeadline(ms: number): void {
@@ -1824,6 +1825,7 @@ class WsTransport implements UpgradeTarget {
   private everOpened = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private pieceSender: PieceSender | null = null
+  private pieces: PieceReceiver | null = null
   private budget: SendBudget | null = null
   private drainCallbacks: Array<() => void> = []
   /** The server's, once a RECONCILED said it. */
@@ -1855,9 +1857,11 @@ class WsTransport implements UpgradeTarget {
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
-      const message = receiveMessage(ws, pieces, data, performance.now())
+      const now = performance.now()
+      const message = receiveMessage(ws, pieces, data, now)
       if (message === null) return
       if (message.frame.tag === TAG.PONG) {
+        sender.heartbeat(message.frame.took, now)
         onPong?.()
         return
       }
@@ -1893,7 +1897,7 @@ class WsTransport implements UpgradeTarget {
     return {
       ping: () => {
         try {
-          sender.send(encode.ping(), this.pingInterval)
+          sender.send(withTook(encode.ping(), pieces.took), this.pingInterval)
         } catch {}
       },
       onPong: (cb) => {
@@ -1966,6 +1970,8 @@ class WsTransport implements UpgradeTarget {
 
   attachHeartbeat(hb: Heartbeat): void {
     this.heartbeat = hb
+    // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
+    hb.expectFrom(() => Math.max(this.pieces?.expectedBy ?? 0, this.pieceSender?.acknowledgedBy ?? 0))
   }
 
   detachHeartbeat(): void {
@@ -2006,24 +2012,23 @@ class WsTransport implements UpgradeTarget {
   private setupHandlers(ws: WebSocket, sender: PieceSender, pieces: PieceReceiver): void {
     if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
+    this.pieces = pieces
     const budget = new SendBudget(sender)
     this.budget = budget
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
       this.heartbeat?.noteReceived(now)
       const message = receiveMessage(ws, pieces, data, now)
-      // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
-      this.heartbeat?.expectUntil(Math.max(pieces.expectedBy, now + sender.acknowledgingMs))
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
         if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return
-        this.heartbeat?.expectUntil(Math.max(pieces.expectedBy, now + sender.acknowledgingMs))
         if (sender.heldBytes === 0) this.settleDrained()
         this.owner._onTransportRoom(this)
         return
       }
       if (frame.tag === TAG.PONG) {
+        sender.heartbeat(frame.took, now)
         this.heartbeat?.resetPong()
         this.owner._onTransportPong(frame.ended)
         return
@@ -2087,17 +2092,17 @@ class WsTransport implements UpgradeTarget {
   }
 
   applyReconciledSettings(ctrl: ReconciledPayload): void {
+    assert(this.pieceSender) // a RECONCILED came on its wire
     this.pingInterval = ctrl.pingInterval
-    if (ctrl.slow) {
-      assert(this.pieceSender) // a RECONCILED came on its wire
-      this.pieceSender.markSlow()
-    }
+    // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
+    this.pieceSender.answered(performance.now())
+    if (ctrl.slow) this.pieceSender.markSlow()
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
-    assert(this.pieceSender)
-    this.pieceSender.send(frame, this.pingInterval)
+    assert(this.pieceSender && this.pieces)
+    this.pieceSender.send(withTook(frame, this.pieces.took), this.pingInterval)
   }
 
   dispose(): void {
@@ -2135,7 +2140,7 @@ function receiveMessage(
     let raw = new Uint8Array(data as ArrayBuffer)
     let frame = decode(raw)
     if (frame.tag === TAG.ANNOUNCE) {
-      pieces.announce(frame.bytes, at)
+      pieces.announce(frame.bytes, at, frame.floor)
       return null
     }
     if (frame.tag === TAG.PIECE) {

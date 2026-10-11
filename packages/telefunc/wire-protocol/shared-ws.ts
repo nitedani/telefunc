@@ -3,6 +3,7 @@ export {
   ACK_STATUS,
   ERROR_REASON,
   encode,
+  withTook,
   decode,
   decodeClientFrame,
   assertProtocol,
@@ -52,8 +53,9 @@ import { assert } from '../utils/assert.js'
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
-// ctrl frames carry 0. Seqs count on past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` returns
-// as they are: the frame's owner reads the whole seq from where it stands on the channel (`seqNear`, `seqThrough`).
+// ctrl frames carry 0, but a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on past 32 bits,
+// and a u32 seq on the wire is their low 32 bits, which `decode` returns as they are: the frame's owner reads the whole
+// seq from where it stands on the channel (`seqNear`, `seqThrough`).
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x0f  connection-level control (no ix, no seq)
@@ -84,10 +86,11 @@ const textDecoder = new TextDecoder()
 const TAG = {
   // ─── Connection-level control (no ix, no seq) ───
   /** Client → server heartbeat. Payload: a `PingEntry` for each closed channel the page holds that the server
-   *  attached. */
+   *  attached. On a WebSocket, its header's seq is what the page took of the frames, as a PIECES_ACK says it (see
+   *  `withTook`). */
   PING: 0x01 as const,
   /** Server → client heartbeat. Payload: a `PongEntry` for each channel the PING names, if the page's session is on this
-   *  wire. */
+   *  wire. On a WebSocket, its header's seq is what the server took of the frames, as a PING says it. */
   PONG: 0x02 as const,
   /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
   FIN: 0x03 as const,
@@ -114,7 +117,8 @@ const TAG = {
    *  newest the ack before covered, 0 for the first, or where it covers none. */
   PIECES_ACK: 0x0b as const,
   /** Either way on a WebSocket: the bytes of the frames that follow it at once, whole or in pieces, which its receiver
-   *  waits for at the rate they arrive (see `pieces.ts`). Payload: u32, their bytes. */
+   *  waits for at the rate they arrive (see `pieces.ts`). Payload: u32, their bytes. Its header's seq: the bytes per s
+   *  its sender knows the link carries at least, 0 for none. */
   ANNOUNCE: 0x0c as const,
 
   // ─── Data plane ───
@@ -349,8 +353,8 @@ type SequencedFrame =
   | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
 
 type ConnCtrlFrame =
-  | { tag: typeof TAG.PING; ended: PingEntry[] }
-  | { tag: typeof TAG.PONG; ended: PongEntry[] }
+  | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
+  | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
@@ -360,7 +364,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
   | { tag: typeof TAG.PIECES_ACK; bytes: number; heldMs: number; spanUs: number }
-  | { tag: typeof TAG.ANNOUNCE; bytes: number }
+  | { tag: typeof TAG.ANNOUNCE; bytes: number; floor: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -539,9 +543,9 @@ const encode = {
     writeU32(frame, HEADER + 8, spanUs)
     return frame
   },
-  announce(bytes: number): Uint8Array<ArrayBuffer> {
+  announce(bytes: number, floorPerS: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 4)
-    writeHeader(frame, TAG.ANNOUNCE, 0, 0)
+    writeHeader(frame, TAG.ANNOUNCE, 0, floorPerS)
     writeU32(frame, HEADER, bytes)
     return frame
   },
@@ -622,6 +626,13 @@ const encode = {
   },
 }
 
+/** `heartbeat`, a PING or PONG, saying its sender took `bytes` of the frames its WebSocket carried in all (mod 2^32):
+ *  their sender bounds the link's rate by it (see `PieceSender.heartbeat`). */
+function withTook(heartbeat: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
+  writeHeader(heartbeat, heartbeat[0]!, 0, bytes)
+  return heartbeat
+}
+
 // ===== Decode =====
 
 /** Raised for every malformed-bytes path. Never `assert`: that one tells the user they found a
@@ -698,7 +709,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const ix = readU16(payload, offset)
         ended.push({ ix, lastSeq: readU32(payload, offset + 2) })
       }
-      return { tag: TAG.PING, ended }
+      return { tag: TAG.PING, ended, took: readU32(frame, 3) }
     }
     case TAG.PONG: {
       assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
@@ -708,7 +719,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const held = payload[offset + 2] === 1
         ended.push({ ix, lastSeq: held ? readU32(payload, offset + 3) : null })
       }
-      return { tag: TAG.PONG, ended }
+      return { tag: TAG.PONG, ended, took: readU32(frame, 3) }
     }
     case TAG.FIN:
       return { tag: TAG.FIN }
@@ -739,7 +750,7 @@ function decode(frame: Uint8Array): DecodedFrame {
       }
     case TAG.ANNOUNCE:
       assertProtocol(payload.length >= 4, 'ANNOUNCE payload too short')
-      return { tag: TAG.ANNOUNCE, bytes: readU32(payload, 0) }
+      return { tag: TAG.ANNOUNCE, bytes: readU32(payload, 0), floor: readU32(frame, 3) / 1000 }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')

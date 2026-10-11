@@ -32,6 +32,7 @@ import {
   isSequencedTag,
   peekTag,
   seqThrough,
+  withTook,
 } from '../shared-ws.js'
 import type {
   BarrierPayload,
@@ -473,7 +474,7 @@ class ChannelMux {
       const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
       assert(announce.tag === TAG.ANNOUNCE)
       assertProtocol(entry.state.pieces, 'ANNOUNCE on a wire that takes no pieces')
-      entry.state.pieces.receiver.announce(announce.bytes, now)
+      entry.state.pieces.receiver.announce(announce.bytes, now, announce.floor)
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(connection)
@@ -553,6 +554,8 @@ class ChannelMux {
   ): null | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
+      const pieces = entry.state.pieces
+      assertProtocol(!pieces || pieces.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
       this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
@@ -614,7 +617,7 @@ class ChannelMux {
 
   private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[]): void {
     entry.state.pongedAt = performance.now()
-    this.send(connection, encode.pong(ended))
+    this.send(connection, withTook(encode.pong(ended), entry.state.pieces?.receiver.took ?? 0))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {

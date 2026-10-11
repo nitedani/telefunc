@@ -216,9 +216,12 @@ const piecesOf = (socket: LoopbackSocket) =>
 /** The bytes a PIECE adds to its piece. */
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
 
-/** The bytes of the first piece of a frame a side sent since `mark`: its probe's, where it measured no rate. */
+/** The bytes of the first piece of a frame a side sent since `mark`: its probe's, where it measured no rate. A smaller
+ *  piece is a small frame's, announced before the wire knew its link slow. */
 const firstPiece = (side: 'page' | 'server', mark: number) => {
-  const sent = loop.sent[side].slice(mark).find(([tag, , bytes]) => tag === TAG.PIECE && bytes > PIECE_HEADER_BYTES)
+  const sent = loop.sent[side]
+    .slice(mark)
+    .find(([tag, , bytes]) => tag === TAG.PIECE && bytes - PIECE_HEADER_BYTES >= WIRE_PROBE_BYTES)
   return sent === undefined ? undefined : sent[2] - PIECE_HEADER_BYTES
 }
 
@@ -1041,6 +1044,25 @@ test.each([1.5, 1])(
   },
 )
 
+test.each((['server', 'page'] as const).flatMap((sender) => [2, 1].map((kbit) => [sender, kbit] as const)))(
+  'on a fresh wire, a 4000 B message the %s sends at %s kbit/s crosses on one wire in the time the link takes',
+  async (sender, kbit) => {
+    config.channel.connectTtl = 600_000
+    config.channel.reconnectTimeout = 600_000
+    loop.linkBytesPerMs = kbit / 8
+    const { server, page } = loop.open<Uint8Array, Uint8Array>()
+    let arrivedAt: number | undefined
+    ;(sender === 'server' ? page : server).listenBinary(() => void (arrivedAt = Date.now()))
+    await run(5_000)
+    const sentAt = Date.now()
+    void (sender === 'server' ? server : page).sendBinary(new Uint8Array(4_000))
+    const crossMs = 4_000 / (kbit / 8)
+    await run(1.2 * crossMs)
+    expect(arrivedAt! - sentAt).toBeLessThanOrEqual(1.01 * crossMs)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
+
 test.each([
   [4 * KIB, 2_000],
   [32 * KIB, 500],
@@ -1105,6 +1127,69 @@ test('a push of 4 KiB messages on a fresh wire cuts only its first', async () =>
   await runUntil(() => got === 2_000, 10_000)
   // Its empty piece, its probe pair, and its rest.
   expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE)).toHaveLength(4)
+})
+
+test('a fresh wire carrying only small messages stops announcing them once one announcement was acknowledged, either way', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  let got = 0
+  page.listenBinary(() => void got++)
+  server.listenBinary(() => void got++)
+  const announces = () =>
+    [loop.sent.page, loop.sent.server].map((sent) => sent.filter(([tag]) => tag === TAG.ANNOUNCE).length)
+  const push = async () => {
+    for (let i = 0; i < 1_000; i++) {
+      void page.sendBinary(new Uint8Array(64))
+      void server.sendBinary(new Uint8Array(64))
+      await run(1)
+    }
+  }
+  await push()
+  const first = announces()
+  await push()
+  await runUntil(() => got === 4_000, 1_000)
+  expect(got).toBe(4_000)
+  expect(announces()).toEqual(first)
+})
+
+test.each((['server', 'page'] as const).flatMap((sender) => [2, 1].map((kbit) => [sender, kbit] as const)))(
+  'a 4000 B message the %s sends as a fresh wire of %s kbit/s opens crosses on that wire',
+  async (sender, kbit) => {
+    config.channel.connectTtl = 600_000
+    config.channel.reconnectTimeout = 600_000
+    loop.linkBytesPerMs = kbit / 8
+    const { server, page } = loop.open<Uint8Array, Uint8Array>()
+    let arrived = false
+    ;(sender === 'server' ? page : server).listenBinary(() => void (arrived = true))
+    if (sender === 'server') server.onOpen(() => void server.sendBinary(new Uint8Array(4_000)))
+    else void page.sendBinary(new Uint8Array(4_000))
+    // The handshake and the message, at the link's rate.
+    await runUntil(() => arrived, (1.2 * 4_600) / (kbit / 8))
+    expect(arrived).toBe(true)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
+
+test('on a fresh wire with a 600 ms round trip, small messages sent once it opened go unannounced, either way', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  await run(0)
+  loop.socket.toServer.latencyMs = loop.socket.toPage.latencyMs = 300
+  let got = 0
+  page.listenBinary(() => void got++)
+  server.listenBinary(() => void got++)
+  server.onOpen(() => void server.sendBinary(new Uint8Array(16)))
+  void page.sendBinary(new Uint8Array(16))
+  await runUntil(() => got === 2, 2_000)
+  for (let i = 0; i < 1_000; i++) {
+    void page.sendBinary(new Uint8Array(64))
+    void server.sendBinary(new Uint8Array(64))
+    await run(1)
+  }
+  await runUntil(() => got === 2_002, 1_000)
+  expect(got).toBe(2_002)
+  expect([loop.sent.page, loop.sent.server].map((sent) => sent.filter(([tag]) => tag === TAG.ANNOUNCE))).toEqual([
+    [],
+    [],
+  ])
 })
 
 test('a WebSocket that cannot be constructed sends the channel to its reconnect loop, it does not throw', async () => {
