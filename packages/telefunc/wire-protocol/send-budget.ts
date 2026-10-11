@@ -28,8 +28,9 @@ const SHED_SHARE = 0.5
  *  behind what the server sends, as long as what the download's credit lets the server have sent takes to arrive (see
  *  `Link.peerQueueWait`). What the uplink holds is every byte handed to the socket, headers included, drained at the rate
  *  the server takes it (see `Link`). While the room is used up and the uplink holds data, a timer looks again as it
- *  drains. The frames that go at once wait behind what it holds, and a page's download window covers that wait: the budget notes it on the
- *  link as the uplink's model says when each is handed, and as the server's acknowledgements measure it for data.
+ *  drains. The frames that go at once wait behind what it holds, and a page's download window covers that wait: the
+ *  budget notes it on the link as the uplink's model says when each is handed, and as the server's acknowledgements
+ *  measure it for data.
  *
  *  The allowance is what keeps data from waiting long in those queues. A PIECES_ACK says when the newest data it covers
  *  arrived, only as the µs after the data the ack before covered, so the clocks of the two ends need not agree: data's
