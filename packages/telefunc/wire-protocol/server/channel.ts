@@ -72,7 +72,6 @@ function parsePeerText(text: string): unknown {
 
 /** The closing frames made while no peer was attached, sent to the next. */
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
-const NO_PENDING_END: PendingEnd = Object.freeze({ closeAck: false, closeRequest: false, abort: null, error: null })
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>
@@ -130,7 +129,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   private _shutdownCallback: ((keep: boolean, pageAttached: boolean) => void) | null = null
-  private _pendingEnd: PendingEnd = NO_PENDING_END
+  private readonly _pendingEnd: PendingEnd = { closeAck: false, closeRequest: false, abort: null, error: null }
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
   private _pageLastSeq = 0
@@ -321,7 +320,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     bytes: number,
     settle: { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void },
   ): void {
-    this._pendingAcks.set(seq, { ...settle, bytes })
+    this._pendingAcks.set(seq, { resolve: settle.resolve, reject: settle.reject, bytes })
     this._pendingAckBytes += bytes
   }
 
@@ -360,7 +359,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue)
     if (this._peer) this._peer.sendAbort(serializedAbortValue)
-    else this._pendingEnd = { ...this._pendingEnd, abort: serializedAbortValue }
+    else this._pendingEnd.abort = serializedAbortValue
     this._shutdown(createAbortError(abortValue, message))
   }
 
@@ -372,7 +371,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._awaitingCloseAck = true
     this._startClose()
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
-    else this._pendingEnd = { ...this._pendingEnd, closeRequest: true }
+    else this._pendingEnd.closeRequest = true
     this._closePromise = this._runFinalizationLoop()
     return this._closePromise
   }
@@ -644,7 +643,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
-    else this._pendingEnd = { ...this._pendingEnd, closeAck: true }
+    else this._pendingEnd.closeAck = true
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -724,8 +723,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         (this._pageLastSeq >= this._replayBuffer.seq &&
           this._prePeerBuffer.size === 0 &&
           this._pendingAckRes.length === 0 &&
-          this._pendingEnd === NO_PENDING_END))
+          !this._hasPendingEnd()))
     )
+  }
+
+  private _hasPendingEnd(): boolean {
+    const end = this._pendingEnd
+    return end.closeAck || end.closeRequest || end.abort !== null || end.error !== null
+  }
+
+  private _clearPendingEnd(): void {
+    const end = this._pendingEnd
+    end.closeAck = end.closeRequest = false
+    end.abort = end.error = null
   }
 
   /** What was sent while no peer was attached goes to `peer`. An ended channel's ack requests were rejected as it
@@ -761,7 +771,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (closeRequest) this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (abort !== null) peer.sendAbort(abort)
     if (error !== null) peer.sendError(error)
-    this._pendingEnd = NO_PENDING_END
+    this._clearPendingEnd()
   }
 
   /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach, in place
@@ -770,7 +780,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._prePeerBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
-    else this._pendingEnd = { ...this._pendingEnd, error: reason }
+    else this._pendingEnd.error = reason
     this._shutdown(err)
   }
 
@@ -933,7 +943,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _dropPending(err?: Error): void {
     this._prePeerBuffer.clear(err)
     this._pendingAckRes.length = 0
-    this._pendingEnd = NO_PENDING_END
+    this._clearPendingEnd()
   }
 
   private _fireClose(err?: Error): void {
