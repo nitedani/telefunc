@@ -187,9 +187,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     )
   }
 
-  override _onPeerSubscription(kind: 'text' | 'binary', on: boolean): void {
-    if (on) this._onPeerBroadcastSubscribe(kind === 'binary')
-    else this._onPeerBroadcastUnsubscribe(kind === 'binary')
+  override _onPeerSubscription(binary: boolean, subscribed: boolean): void {
+    if (subscribed) this._onPeerBroadcastSubscribe(binary)
+    else this._onPeerBroadcastUnsubscribe(binary)
   }
 
   _onPeerBroadcastSubscribe(binary: boolean): void {

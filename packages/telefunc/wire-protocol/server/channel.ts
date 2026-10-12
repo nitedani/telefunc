@@ -416,8 +416,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flushPrePeerBuffer(peer)
     this._sendPendingAckRes(peer)
     if (state?.broadcast) {
-      this._onPeerSubscription('text', state.broadcast.text)
-      this._onPeerSubscription('binary', state.broadcast.binary)
+      this._onPeerSubscription(false, state.broadcast.text)
+      this._onPeerSubscription(true, state.broadcast.binary)
     }
     this._sendPendingEnd(peer)
     if (this._isClosed) {
@@ -514,12 +514,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:
-        this._onPeerSubscription(frame.binary ? 'binary' : 'text', frame.tag === TAG.BROADCAST_SUB)
+        this._onPeerSubscription(frame.binary, frame.tag === TAG.BROADCAST_SUB)
     }
   }
 
   // A broadcast takes subscriptions; a plain channel drops them.
-  _onPeerSubscription(_kind: 'text' | 'binary', _on: boolean): void {}
+  _onPeerSubscription(_binary: boolean, _subscribed: boolean): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
