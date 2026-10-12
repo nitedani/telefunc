@@ -343,15 +343,12 @@ type ClientChannelTransport = {
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
+  /** Its wire's, which tracks what the wire delivers. */
+  readonly heartbeat: Heartbeat | null
   /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
-  hasHeartbeat(): boolean
-  /** How long its wire has delivered nothing, as its heartbeat tracks it: `Infinity` without one. */
-  quietFor(): number
-  /** The bytes its wire delivered in the `ms` before it last delivered, as its heartbeat tracks it: 0 without one. */
-  deliveredBeforeLast(ms: number): number
   /** How long the frames that go at once wait behind its wire's own data, `null` where it can't tell. */
   sendWait(): SendWait | null
   /** Settles once the frames it was handed have left it, or its wire is gone. */
@@ -901,7 +898,7 @@ class ClientConnection implements MuxConnection {
   }
 
   deliveredBeforeLast(ms: number): number {
-    return this.transport.deliveredBeforeLast(ms)
+    return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   sendWait(): SendWait | null {
@@ -1060,7 +1057,7 @@ class ClientConnection implements MuxConnection {
     if (u === null) return
     u.joinTimer = null
     // The FIN comes behind what the old wire still delivers: given up on once that wire went quiet for the timeout.
-    const quiet = u.finReceived ? Infinity : u.from.quietFor()
+    const quiet = u.finReceived ? Infinity : (u.from.heartbeat?.quietFor() ?? Infinity)
     if (quiet < UPGRADE_HANDOFF_JOIN_TIMEOUT_MS) {
       u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - quiet)
       return
@@ -1088,7 +1085,7 @@ class ClientConnection implements MuxConnection {
   /** Idempotent once a RECONCILED set the interval. Detaches first either way so a fresh install can never leak the
    *  prior. A provisional one leaves the server's interval unknown, and the next install replaces it. */
   private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional = false): void {
-    if (transport.hasHeartbeat() && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
+    if (transport.heartbeat !== null && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
     transport.detachHeartbeat()
     if (!provisional) this.pingIntervalMs = intervalMs
     this.provisionalHeartbeat = provisional
@@ -1211,7 +1208,7 @@ class ClientConnection implements MuxConnection {
     if (this.closed || !this.reconciling) return
     // A RECONCILE waits behind what the page sent before it, as an upload on a slow link: the wire is dead once it has
     // delivered nothing for the deadline.
-    const quiet = this.transport.quietFor()
+    const quiet = this.transport.heartbeat?.quietFor() ?? Infinity
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
     this.dropWire(this.transport)
   }
@@ -1920,7 +1917,7 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   link = new Link()
-  private heartbeat: Heartbeat | null = null
+  heartbeat: Heartbeat | null = null
   /** The probe's socket, with the ends it keeps as the transport adopts it: the server counts every frame the socket
    *  carries. */
   private probed: ({ ws: WebSocket } & WsEnds) | null = null
@@ -2086,18 +2083,6 @@ class WsTransport implements UpgradeTarget {
   detachHeartbeat(): void {
     this.heartbeat?.stop()
     this.heartbeat = null
-  }
-
-  hasHeartbeat(): boolean {
-    return this.heartbeat !== null
-  }
-
-  quietFor(): number {
-    return this.heartbeat?.quietFor() ?? Infinity
-  }
-
-  deliveredBeforeLast(ms: number): number {
-    return this.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   drained(): Promise<void> {
@@ -2321,7 +2306,7 @@ class SseTransport implements UpgradeSource {
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
   }
-  private heartbeat: Heartbeat | null = null
+  heartbeat: Heartbeat | null = null
   private connecting = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
   /** Abort handle for the active transport's fetches. `null` means no active transport. */
@@ -2838,18 +2823,6 @@ class SseTransport implements UpgradeSource {
   detachHeartbeat(): void {
     this.heartbeat?.stop()
     this.heartbeat = null
-  }
-
-  hasHeartbeat(): boolean {
-    return this.heartbeat !== null
-  }
-
-  quietFor(): number {
-    return this.heartbeat?.quietFor() ?? Infinity
-  }
-
-  deliveredBeforeLast(ms: number): number {
-    return this.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
   sendWait(): null {
