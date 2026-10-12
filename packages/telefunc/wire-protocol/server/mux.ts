@@ -1118,7 +1118,7 @@ class ChannelMux {
     if (!entry) return
     const { state } = entry
     if (state.pastSendBacklog) return
-    if (state.probed.length > 0 && frame[0] !== TAG.RECONCILED) this.answerProbes(connection, state)
+    if (state.probed.length > 0) this.answerProbes(connection, state)
     if (frame[0] === TAG.ACK_RES) state.pieces?.receiver.answering()
     if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
     if (frame.byteLength > state.sendHeadroom) {
