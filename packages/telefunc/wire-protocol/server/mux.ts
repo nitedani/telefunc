@@ -50,7 +50,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceReceiver, PieceSender } from '../pieces.js'
+import { PieceSender, ServerPieceReceiver } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
 import type { ServerChannel } from './channel.js'
@@ -157,7 +157,7 @@ type ConnectionState = {
   frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: { sender: PieceSender; receiver: PieceReceiver } | null
+  pieces: { sender: PieceSender; receiver: ServerPieceReceiver } | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -297,10 +297,10 @@ class ChannelMux {
         pongedAt: performance.now(),
         pieces: sender && {
           sender,
-          receiver: new PieceReceiver((frame) => this.send(connection, frame), {
-            peerHoldsBack: true,
-            carry: (ack) => sender.carry(ack),
-          }),
+          receiver: new ServerPieceReceiver(
+            (frame) => this.send(connection, frame),
+            (ack) => sender.carry(ack),
+          ),
         },
         terminatePermanently: false,
         recvChain: null,

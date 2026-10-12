@@ -2,7 +2,7 @@ export { WsTransport }
 
 import { assert } from '../../utils/assert.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../constants.js'
-import { PieceReceiver, PieceSender } from '../pieces.js'
+import { PagePieceReceiver, PieceSender } from '../pieces.js'
 import { SendBudget } from './send-budget.js'
 import type { SendWait } from '../link.js'
 import { Uplink } from './uplink.js'
@@ -23,7 +23,7 @@ import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from '
 import type { Heartbeat } from './heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
-type WsEnds = { uplink: Uplink; budget: SendBudget; pieces: PieceReceiver }
+type WsEnds = { uplink: Uplink; budget: SendBudget; pieces: PagePieceReceiver }
 
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
@@ -41,7 +41,7 @@ class WsTransport implements UpgradeTarget {
   private everOpened = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private pieceSender: PieceSender | null = null
-  private pieces: PieceReceiver | null = null
+  private pieces: PagePieceReceiver | null = null
   private budget: SendBudget | null = null
   private drainCallbacks: Array<() => void> = []
   /** The server's, once a RECONCILED said it. */
@@ -221,11 +221,11 @@ class WsTransport implements UpgradeTarget {
     return {
       uplink,
       budget,
-      pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), {
-        peerHoldsBack: false,
+      pieces: new PagePieceReceiver(
+        (frame) => sender.send(frame, this.pingInterval),
+        (ack) => sender.carry(ack),
         uplink,
-        carry: (ack) => sender.carry(ack),
-      }),
+      ),
     }
   }
 
@@ -362,11 +362,11 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PieceReceiver` says, and
- *  hands `take` its frames, none for a piece before its frame's last. Returns false where its wire closes: for bytes
+/** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PagePieceReceiver` says,
+ *  and hands `take` its frames, none for a piece before its frame's last. Returns false where its wire closes: for bytes
  *  that close it, before `take` had any, or once `take` returned false. */
 function receiveMessage(
-  pieces: PieceReceiver,
+  pieces: PagePieceReceiver,
   raw: Uint8Array<ArrayBuffer>,
   at: number,
   take: (frame: DecodedFrame, byteLength: number) => boolean,

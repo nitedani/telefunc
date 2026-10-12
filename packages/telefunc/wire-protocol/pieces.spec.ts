@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { Link } from './link.js'
-import { PieceReceiver, PieceSender } from './pieces.js'
+import { PagePieceReceiver, PieceSender, ServerPieceReceiver } from './pieces.js'
+import { Uplink } from './client/uplink.js'
 import { decode, encode, TAG } from './shared-ws.js'
 
 afterEach(() => void vi.restoreAllMocks())
@@ -200,7 +201,10 @@ test('a receiver whose peer holds data back acknowledges data within 25 ms once 
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
   const acks = () => sent.map((frame) => decode(frame))
-  const receiver = new PieceReceiver((frame) => void sent.push(frame), { peerHoldsBack: true, carry: () => {} })
+  const receiver = new ServerPieceReceiver(
+    (frame) => void sent.push(frame),
+    () => {},
+  )
   receiver.arrived(1_000, true, Date.now())
   vi.advanceTimersByTime(100)
   expect(sent).toHaveLength(0)
@@ -223,10 +227,11 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB 
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
   let carried: (() => Uint8Array | null) | null = null
-  const receiver = new PieceReceiver((frame) => void sent.push(frame), {
-    peerHoldsBack: false,
-    carry: (ack) => void (carried = ack),
-  })
+  const receiver = new PagePieceReceiver(
+    (frame) => void sent.push(frame),
+    (ack) => void (carried = ack),
+    new Uplink(),
+  )
   const next = () => {
     const ack = carried?.() ?? null
     carried = null
@@ -253,7 +258,11 @@ test('a receiver puts back a frame from pieces of any size, acknowledging the tw
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
-  const receiver = new PieceReceiver((frame) => void sent.push(frame), { peerHoldsBack: false, carry: () => {} })
+  const receiver = new PagePieceReceiver(
+    (frame) => void sent.push(frame),
+    () => {},
+    new Uplink(),
+  )
   const frame = data(10_000).map((byte, i) => (i === 0 ? byte : i % 251))
   expect(receiver.add(10_000, frame.subarray(0, 0), Date.now())).toBeNull()
   expect(receiver.add(10_000, frame.subarray(0, 0), Date.now())).toBeNull()
@@ -280,7 +289,11 @@ test('a receiver puts back a frame from pieces of any size, acknowledging the tw
 })
 
 test('a receiver waits for the next message of an open announcement twice the time it takes at the rate the newest came at, which may carry twice as much, or 8 KiB, until an announcement of their bytes closes it', () => {
-  const receiver = new PieceReceiver(() => {}, { peerHoldsBack: false, carry: () => {} })
+  const receiver = new PagePieceReceiver(
+    () => {},
+    () => {},
+    new Uplink(),
+  )
   receiver.announce(0, 0)
   // Before a message of it arrived, it knows no rate.
   expect(receiver.expectedBy(10_000)).toBe(0)
@@ -302,7 +315,11 @@ test.each([
   ['empty after the first', [100, 0]],
   ['longer than what is left of its frame', [100, 9_901]],
 ])('a receiver refuses a piece %s', (_, sizes) => {
-  const receiver = new PieceReceiver(() => {}, { peerHoldsBack: false, carry: () => {} })
+  const receiver = new PagePieceReceiver(
+    () => {},
+    () => {},
+    new Uplink(),
+  )
   const frame = data(20_000)
   expect(() => {
     let at = 0

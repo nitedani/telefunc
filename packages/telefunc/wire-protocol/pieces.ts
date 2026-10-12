@@ -1,4 +1,4 @@
-export { PieceSender, PieceReceiver }
+export { PieceSender, ServerPieceReceiver, PagePieceReceiver }
 export type { SendRoom }
 
 import {
@@ -528,11 +528,11 @@ class PieceSender {
 }
 
 /** One WebSocket's receiver: puts a frame sent in pieces back together, and acknowledges the bytes it took. */
-class PieceReceiver {
+abstract class PieceReceiver {
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
   private received = 0
-  private total = 0
+  protected total = 0
   private data = false
   /** The pieces still to acknowledge at once. */
   private probing = 0
@@ -546,12 +546,12 @@ class PieceReceiver {
   private floor = DOUBLE_ZERO
   /** The bytes of the messages it took in all, headers and announcements included, and when it last acknowledged. */
   took = 0
-  private acknowledgedTook = 0
-  private newestAt = DOUBLE_ZERO
+  protected acknowledgedTook = 0
+  protected newestAt = DOUBLE_ZERO
   /** When the newest data frame arrived, and when the newest the last acknowledgement covered did. */
   private newestDataAt: number | null = null
   private acknowledgedDataAt: number | null = null
-  private ackedAt = Number.NEGATIVE_INFINITY
+  protected ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
   private ackDue = DOUBLE_ZERO
   /** The acknowledgement the timer sends goes alone (see `acknowledgeIn`). */
@@ -562,25 +562,25 @@ class PieceReceiver {
 
   constructor(
     private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
-    /** `uplink`: the page's, whose share for acknowledgements they wait for. `carry`: its side's
-     *  `PieceSender.carry`. */
-    private readonly options: {
-      peerHoldsBack: boolean
-      uplink?: Uplink
-      carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
-    },
+    /** Its side's `PieceSender.carry`. */
+    private readonly carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void,
   ) {}
+
+  /** A whole frame of `bytes` arrived at `at`, as an announced message if `announced`. */
+  protected abstract tookFrame(bytes: number, data: boolean, announced: boolean, at: number): void
+  /** A piece arrived, as an announced message if `announced`, and made its frame `whole`. */
+  protected abstract tookPiece(whole: boolean, announced: boolean): void
+  /** An ANNOUNCE that arrived at `at` closed an announcement. */
+  protected abstract tookClose(at: number): void
+  /** How long an acknowledgement waits from now. */
+  protected abstract ackWait(): number
 
   /** After a whole frame of `bytes` arrived at `at`: alone in its message, or `riding` ahead of the frame its message ends
    *  with, which dates the message. A data frame dates the ack's span: it takes the queues an upload fills, where the
    *  frames that go at once pass them. */
   arrived(bytes: number, data: boolean, at: number, riding = false): void {
     this.took += bytes
-    const announced = !riding && this.paced(bytes, at)
-    if (!this.options.peerHoldsBack && !acknowledges(bytes)) return
-    this.date(data, at)
-    if (!this.options.peerHoldsBack) this.acknowledgeSoon(true)
-    else if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+    this.tookFrame(bytes, data, !riding && this.paced(bytes, at), at)
   }
 
   /** Takes an ANNOUNCE that arrived at `at`. One of no bytes opens an announcement: frames follow it at once, over a link
@@ -596,9 +596,7 @@ class PieceReceiver {
     }
     assertProtocol(bytes === this.announced, 'ANNOUNCE of other bytes than followed the one before')
     this.announced = null
-    if (this.options.peerHoldsBack) return
-    this.date(false, at)
-    this.acknowledgeSoon()
+    this.tookClose(at)
   }
 
   /** Until when it waits for the next message of what was announced: twice the time `announcedNext` of the newest takes at
@@ -621,13 +619,6 @@ class PieceReceiver {
     this.lastAnnounced = bytes
     this.announced += bytes
     return true
-  }
-
-  /** Its side answers what arrived: where its peer holds data back, the answer's message acknowledges the data it took,
-   *  so the peer's next request doesn't wait for the acknowledgement's timer. */
-  answering(): void {
-    if (this.options.peerHoldsBack && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES)
-      this.acknowledgeWithNext()
   }
 
   /** Takes a LENGTH of `bytes`, after the frame it measures: taken, as an ANNOUNCE is, not dated. */
@@ -667,9 +658,7 @@ class PieceReceiver {
     if (this.probing > 0) {
       this.probing--
       this.acknowledge()
-    } else if (this.options.peerHoldsBack) {
-      if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
-    } else if (whole && acknowledges(total)) this.acknowledgeSoon(true)
+    } else this.tookPiece(whole, announced)
     if (!whole) return null
     const frame = this.frame
     this.frame = new Uint8Array(0)
@@ -677,22 +666,16 @@ class PieceReceiver {
     return frame
   }
 
-  private date(data: boolean, at: number): void {
+  /** Dates what arrived at `at`, as data if `data`: the newest the next acknowledgement covers. */
+  protected date(data: boolean, at: number): void {
     this.newestAt = at
-    if (!data) return
-    this.newestDataAt = at
-    if (this.options.peerHoldsBack && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES)
-      this.acknowledgeIn(WIRE_SEND_ACK_MS)
+    if (data) this.newestDataAt = at
   }
 
-  /** Acknowledges once the gap and the share allow; `withNext`, in the message its side sends next then: an
-   *  acknowledgement that only measures the rate, which its own delay dates, as a peer that holds nothing back takes
-   *  one of a frame. */
-  private acknowledgeSoon(withNext = false): void {
-    const wait = Math.max(
-      this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt,
-      this.options.uplink?.acks.wait() ?? 0,
-    )
+  /** Acknowledges once `ackWait` allows; `withNext`, in the message its side sends next then: an acknowledgement that
+   *  only measures the rate, which its own delay dates, as a peer that holds nothing back takes one of a frame. */
+  protected acknowledgeSoon(withNext = false): void {
+    const wait = this.ackWait()
     if (wait > 0) this.acknowledgeIn(wait, withNext)
     else if (withNext) this.acknowledgeWithNext()
     else this.acknowledge()
@@ -700,7 +683,7 @@ class PieceReceiver {
 
   /** Acknowledges `ms` from now, or sooner where it already would; `withNext`, as `acknowledgeSoon` says, unless an
    *  acknowledgement that doesn't wait is due by then too. */
-  private acknowledgeIn(ms: number, withNext = false): void {
+  protected acknowledgeIn(ms: number, withNext = false): void {
     if (!withNext) this.ackAlone = true
     const due = performance.now() + ms
     if (this.ackTimer !== null) {
@@ -722,10 +705,10 @@ class PieceReceiver {
   }
 
   /** Acknowledges in the message its side sends next. */
-  private acknowledgeWithNext(): void {
+  protected acknowledgeWithNext(): void {
     if (this.carrying) return
     this.carrying = true
-    this.options.carry(() => (this.carrying ? this.acknowledgement() : null))
+    this.carry(() => (this.carrying ? this.acknowledgement() : null))
   }
 
   private acknowledgement(): Uint8Array<ArrayBuffer> {
@@ -741,5 +724,70 @@ class PieceReceiver {
     this.acknowledgedDataAt = this.newestDataAt
     // Rounded down: its sender then dates the arrival no earlier than it was, and takes a rate no faster than the link's.
     return encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt), span)
+  }
+}
+
+/** The server's: its peer, the page, holds data back by what it acknowledges (see `SendBudget`), so it acknowledges each
+ *  announced message, as the page's PINGs wait behind them, once more than `WIRE_PIECES_ACK_BYTES` of frames of any size
+ *  are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`, data within `WIRE_SEND_ACK_MS`, and what it
+ *  took in the message of its answer to it (`answering`). */
+class ServerPieceReceiver extends PieceReceiver {
+  /** Its side answers what arrived: the answer's message acknowledges the data it took, so the page's next request
+   *  doesn't wait for the acknowledgement's timer. */
+  answering(): void {
+    if (this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeWithNext()
+  }
+
+  protected override date(data: boolean, at: number): void {
+    super.date(data, at)
+    if (data && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeIn(WIRE_SEND_ACK_MS)
+  }
+
+  protected tookFrame(_bytes: number, data: boolean, announced: boolean, at: number): void {
+    this.date(data, at)
+    if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+  }
+
+  protected tookPiece(_whole: boolean, announced: boolean): void {
+    if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+  }
+
+  protected tookClose(): void {}
+
+  protected ackWait(): number {
+    return this.ackedAt + WIRE_SEND_ACK_GAP_MS - this.newestAt
+  }
+}
+
+/** The page's: it acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one
+ *  PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS` and none before its uplink's share for them allows one, a frame in the message
+ *  its side sends next: all a sender needs that cuts its pieces by the rate it measures, and stops announcing by the
+ *  rate it carries. */
+class PagePieceReceiver extends PieceReceiver {
+  constructor(
+    send: (frame: Uint8Array<ArrayBuffer>) => void,
+    carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void,
+    private readonly uplink: Uplink,
+  ) {
+    super(send, carry)
+  }
+
+  protected tookFrame(bytes: number, data: boolean, _announced: boolean, at: number): void {
+    if (!acknowledges(bytes)) return
+    this.date(data, at)
+    this.acknowledgeSoon(true)
+  }
+
+  protected tookPiece(whole: boolean): void {
+    if (whole && acknowledges(this.total)) this.acknowledgeSoon(true)
+  }
+
+  protected tookClose(at: number): void {
+    this.date(false, at)
+    this.acknowledgeSoon()
+  }
+
+  protected ackWait(): number {
+    return Math.max(this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt, this.uplink.acks.wait())
   }
 }
