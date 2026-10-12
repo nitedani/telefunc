@@ -556,11 +556,14 @@ class ChannelMux {
     const byteLength = rawFrame.byteLength
     if (byteLength > maxFrameBytes) return true
     const { state, transport } = entry
+    const backlogBytes = state.recvBacklogBytes + byteLength
+    const backlogFrames = state.recvBacklogFrames
+    if (backlogBytes <= WIRE_RECV_BACKLOG_BASE_BYTES && backlogFrames < WIRE_RECV_BACKLOG_BASE_FRAMES) return false
     const sessionId = transport.getSessionId(connection)
     const channels = sessionId === undefined ? 0 : (this.sessions.peekSession(sessionId)?.size ?? 0)
     return (
-      state.recvBacklogBytes + byteLength > WIRE_RECV_BACKLOG_BASE_BYTES + channels * CREDIT_WINDOW_MAX_BYTES ||
-      state.recvBacklogFrames >= WIRE_RECV_BACKLOG_BASE_FRAMES + channels * CREDIT_MSG_WINDOW_MAX
+      backlogBytes > WIRE_RECV_BACKLOG_BASE_BYTES + channels * CREDIT_WINDOW_MAX_BYTES ||
+      backlogFrames >= WIRE_RECV_BACKLOG_BASE_FRAMES + channels * CREDIT_MSG_WINDOW_MAX
     )
   }
 
