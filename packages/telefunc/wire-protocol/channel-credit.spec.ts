@@ -1590,9 +1590,11 @@ test("on a 100 B/ms uplink, the server answers the pieces of the page's 1 MB fra
 const pageCounts = (page: unknown) =>
   (
     page as {
-      _connection: { transport: { pieceSender: { transmittedBytes: number }; pieces: { took: number } } }
+      _connection: {
+        transport: { ends: { budget: { sender: { transmittedBytes: number } }; pieces: { took: number } } }
+      }
     }
-  )._connection.transport
+  )._connection.transport.ends
 
 // A budget sees all it puts on a slow uplink only if every byte counts: a piece's header and an announcement too.
 test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken is what the wire holds, headers included", async () => {
@@ -1609,7 +1611,7 @@ test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken
     const ends = pageCounts(page)
     off.up = Math.max(
       off.up,
-      Math.abs(ends.pieceSender.transmittedBytes - serverEnds().receiver.took - socket.toServer.bytes),
+      Math.abs(ends.budget.sender.transmittedBytes - serverEnds().receiver.took - socket.toServer.bytes),
     )
     off.down = Math.max(
       off.down,
@@ -2122,13 +2124,14 @@ test("on a 1250 B/ms uplink with bursts of 2400 KiB every 2000 ms beside a 20 MB
   let idle = 0
   await downloadBeside(1_250, (page) => {
     const timer = setInterval(() => void page.sendBinary(new Uint8Array(2_400 * KIB)).catch(() => {}), 2_000)
-    const sender = (page as unknown as { _connection: { transport: { pieceSender: { heldBytes: number } } } })
-      ._connection.transport
+    const transport = (
+      page as unknown as { _connection: { transport: { ends: { budget: { sender: { heldBytes: number } } } } } }
+    )._connection.transport
     const measureFrom = Date.now() + 10_000
     const sampler = setInterval(() => {
       const pipe = loop.socket.toServer as unknown as { queue: unknown[]; lastAt: number }
       if (Date.now() < measureFrom) return
-      if (sender.pieceSender.heldBytes > 0 && (pipe.queue.length === 0 || pipe.lastAt < Date.now())) idle++
+      if (transport.ends.budget.sender.heldBytes > 0 && (pipe.queue.length === 0 || pipe.lastAt < Date.now())) idle++
     }, 1)
     return () => {
       clearInterval(timer)
