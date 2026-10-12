@@ -196,23 +196,30 @@ describe('cloudflare adapter entrypoint', () => {
     expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
   })
 
-  it('derives a new shard and token when no token is provided, and hands the token to the session Durable Object', async () => {
+  it("routes a request that names no token by a new one, and hands its session Durable Object none to pin, though the request carried the token's header", async () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
     const kv = createMockKV()
-    const request = new Request('https://telefunc.test/_telefunc')
+    const put = vi.spyOn(kv, 'put')
+    const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
 
     await tf.serve({
-      request,
-      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
+      env,
     })
 
+    expect(vi.mocked(resolveSessionRoutingTarget).mock.lastCall![4]).toMatch(/^[0-9a-f-]{36}$/)
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
       locationHint: 'weur',
     })
-    expect(fetch).toHaveBeenCalledTimes(1)
-
-    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
+    const forwardedRequest = fetch.mock.calls[0]![0] as Request
+    expect(forwardedRequest.headers.has('x-telefunc-session')).toBe(false)
+    const instance = new tf.TelefuncDurableObject({} as DurableObjectState, env) as unknown as {
+      fetch(request: Request): Promise<Response>
+    }
+    await instance.fetch(forwardedRequest)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(put).not.toHaveBeenCalled()
   })
 
   it("leaves a page's pin to its session Durable Object, however many of its first requests miss KV", async () => {
@@ -245,16 +252,6 @@ describe('cloudflare adapter entrypoint', () => {
       'lapsed-token',
     )
     expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toBe('lapsed-token')
-  })
-
-  it('takes the session token from the session query parameter only', async () => {
-    const { binding, fetch } = createBinding()
-    const tf = new Telefunc()
-    await tf.serve({
-      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
-      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
-    })
-    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it("returns the session Durable Object's response as is, without the session token", async () => {

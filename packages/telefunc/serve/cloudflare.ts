@@ -219,7 +219,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         : resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
 
       const forwardedHeaders = new Headers(request.headers as Headers)
-      forwardedHeaders.set(TELEFUNC_SESSION_HEADER, token)
+      // A token the client didn't name is never presented again: its session Durable Object pins none.
+      if (presented) forwardedHeaders.set(TELEFUNC_SESSION_HEADER, presented)
+      else forwardedHeaders.delete(TELEFUNC_SESSION_HEADER)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
