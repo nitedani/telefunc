@@ -122,11 +122,9 @@ class Link implements SendWait {
     while (this.grants.length > 0 && this.grants.peek()!.at <= now) this.grantedBytes += this.grants.shift()!.bytes
   }
 
-  /** Takes a round trip a probe on this wire took. Returns whether it is the first. */
-  measured(rtt: number): boolean {
-    const first = this.pathRtt === Number.POSITIVE_INFINITY
+  /** Takes a round trip a probe on this wire took. */
+  measured(rtt: number): void {
     if (rtt < this.pathRtt) this.pathRtt = rtt
-    return first
   }
 
   /** Takes a rate `rate` measured at `at`: it stands if faster, or once the one before lapsed. Returns whether it stood. */
@@ -138,7 +136,7 @@ class Link implements SendWait {
   }
 
   /** Whether no rate stands at `at`. */
-  lapsed(at: number): boolean {
+  private lapsed(at: number): boolean {
     return this.fastest === 0 || at - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS
   }
 
