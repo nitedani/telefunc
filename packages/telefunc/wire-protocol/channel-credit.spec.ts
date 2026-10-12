@@ -18,7 +18,7 @@ import {
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { Fifo } from '../utils/Fifo.js'
-import { TAG, encode } from './shared-ws.js'
+import { TAG, encode, isOneFrame, messageFrames } from './shared-ws.js'
 import { SendBudget } from './send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
@@ -107,7 +107,7 @@ class LoopbackSocket {
   get bufferedAmount(): number {
     return this.toServer.bytes
   }
-  send(frame: Uint8Array): void {
+  send(frame: Uint8Array<ArrayBuffer>): void {
     loop.sends('page', frame)
     this.toServer.push(frame.slice())
   }
@@ -147,26 +147,36 @@ class Loopback {
   private readonly connectionKey = crypto.randomUUID()
   private readonly pages: ClientChannel[] = []
   private watch: { from: 'page' | 'server'; tag: number; then: () => void } | null = null
-  /** Every frame each side sent, as `[tag, channel ix, bytes]`, and when. */
-  readonly sent = { page: [] as [number, number, number][], server: [] as [number, number, number][] }
+  /** Every frame each side sent, as `[tag, channel ix, bytes, the number of the WebSocket message it went in]`, and
+   *  when. */
+  readonly sent = {
+    page: [] as [number, number, number, number][],
+    server: [] as [number, number, number, number][],
+  }
   readonly sentAt = { page: [] as number[], server: [] as number[] }
+  /** The WebSocket messages each side sent. */
+  readonly messages = { page: 0, server: 0 }
   /** The tag of each frame that reached the server, and when. */
   readonly arrived: [number, number][] = []
   /** Runs `then` once, as `from` sends its next frame of `tag`. */
   onSend(from: 'page' | 'server', tag: number, then: () => void): void {
     this.watch = { from, tag, then }
   }
-  sends(from: 'page' | 'server', frame: Uint8Array): void {
-    this.sent[from].push([frame[0]!, frame[1]! | (frame[2]! << 8), frame.byteLength])
-    this.sentAt[from].push(Date.now())
-    const watch = this.watch
-    if (!watch || watch.from !== from || watch.tag !== frame[0]) return
-    this.watch = null
-    watch.then()
+  sends(from: 'page' | 'server', message: Uint8Array<ArrayBuffer>): void {
+    const n = this.messages[from]++
+    for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
+      this.sent[from].push([frame[0]!, frame[1]! | (frame[2]! << 8), frame.byteLength, n])
+      this.sentAt[from].push(Date.now())
+      const watch = this.watch
+      if (!watch || watch.from !== from || watch.tag !== frame[0]) continue
+      this.watch = null
+      watch.then()
+    }
   }
-  receive(socket: LoopbackSocket, frame: Uint8Array<ArrayBuffer>): void {
-    this.arrived.push([frame[0]!, Date.now()])
-    this.mux.onConnectionRawMessage(socket, frame).catch((err) => this.errors.push(err))
+  receive(socket: LoopbackSocket, message: Uint8Array<ArrayBuffer>): void {
+    for (const frame of isOneFrame(message) ? [message] : messageFrames(message))
+      this.arrived.push([frame[0]!, Date.now()])
+    this.mux.onConnectionRawMessage(socket, message).catch((err) => this.errors.push(err))
   }
   /** The wire the page uses now. */
   get socket(): LoopbackSocket {
@@ -214,9 +224,8 @@ const piecesOf = (socket: LoopbackSocket) =>
     }
   ).connectionEntries.get(socket)?.state.pieces
 
-/** The bytes a PIECE adds to its piece, and a PIECES_ACK's. */
+/** The bytes a PIECE adds to its piece. */
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
-const PIECES_ACK_BYTES = encode.piecesAck(0, 0, 0).byteLength
 
 /** What the server holds for the page on `socket`: what the wire carries, and what waits for a probe. */
 const serverHolds = (socket: LoopbackSocket) =>
@@ -1195,13 +1204,29 @@ test('a push of 4 KiB messages on a fresh wire whose floor carries them within a
   expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE || tag === TAG.ANNOUNCE)).toEqual([])
 })
 
+test('a push of small messages nobody awaits reaches the page in one WebSocket message, on a fresh wire and after', async () => {
+  const { server, page } = loop.open<string, string>()
+  let got = 0
+  page.listen(() => void got++)
+  await run(100)
+  const push = async () => {
+    const mark = loop.sent.server.length
+    const until = got + 60
+    for (let i = 0; i < 60; i++) void server.send('x'.repeat(64))
+    await runUntil(() => got === until, 1_000)
+    return new Set(loop.sent.server.slice(mark).flatMap(([tag, , , message]) => (tag === TAG.TEXT ? [message] : [])))
+      .size
+  }
+  expect([await push(), await push()]).toEqual([1, 1])
+})
+
 test("a channel's first attach sends no window either way: each side starts with the initial limits", async () => {
   const { page } = loop.open<string, string>()
   let opened = false
   page.onOpen(() => (opened = true))
   await runUntil(() => opened, 1_000)
   await run(100)
-  const windows = (sent: [number, number, number][]) =>
+  const windows = (sent: [number, number, number, number][]) =>
     sent.filter(([tag]) => tag === TAG.WINDOW || tag === TAG.MSG_WINDOW).map(([tag]) => tag)
   expect([windows(loop.sent.page), windows(loop.sent.server)]).toEqual([[], []])
 })
@@ -1249,9 +1274,11 @@ test("the server acknowledges a page's message in the message of its answer", as
   await echo()
   const before = loop.sent.server.length
   for (let i = 0; i < 10; i++) await echo()
-  const acks = loop.sent.server.slice(before).filter(([tag]) => tag === TAG.PIECES_ACK || tag === TAG.ACK_RES)
-  // A message that starts with a PIECES_ACK and is longer carries the answer behind it.
-  expect(acks.map(([tag, , bytes]) => [tag, bytes > PIECES_ACK_BYTES])).toEqual(Array(10).fill([TAG.PIECES_ACK, true]))
+  const sent = loop.sent.server.slice(before)
+  const answers = sent.filter(([tag]) => tag === TAG.ACK_RES).map(([, , , message]) => message)
+  const acks = sent.filter(([tag]) => tag === TAG.PIECES_ACK).map(([, , , message]) => message)
+  expect(acks).toEqual(answers)
+  expect(answers).toHaveLength(10)
 })
 
 test.each(['page', 'server'] as const)(
@@ -1288,7 +1315,13 @@ const pageReplayBytes = (page: unknown) =>
       page as { _connection: { replayBuffers: Map<number, { byteLength: number }> } }
     )._connection.replayBuffers.values(),
   ][0]!.byteLength
-const WINDOW_BYTES = encode.window(0, 0, 0).byteLength
+
+/** The frames of `sent` of `tag` that went in a WebSocket message of their own. */
+const alone = (sent: [number, number, number, number][], tag: number) => {
+  const frames = new Map<number, number>()
+  for (const [, , , message] of sent) frames.set(message, (frames.get(message) ?? 0) + 1)
+  return sent.filter(([t, , , message]) => t === tag && frames.get(message) === 1)
+}
 
 test("a page acknowledges the answers it receives in the next message it sends, and the server's replay lets them go", async () => {
   const { server, page } = loop.open<string, string>()
@@ -1300,10 +1333,10 @@ test("a page acknowledges the answers it receives in the next message it sends, 
     void page.send('x'.repeat(256 * KIB), { ack: true }).then(() => (answered = true))
     while (!answered) await run(1)
   }
-  const windows = loop.sent.page.slice(before).filter(([tag]) => tag === TAG.WINDOW)
+  const sent = loop.sent.page.slice(before)
   // Each rides the request after it.
-  expect(windows.filter(([, , bytes]) => bytes === WINDOW_BYTES)).toEqual([])
-  expect(windows.length).toBeGreaterThan(0)
+  expect(alone(sent, TAG.WINDOW)).toEqual([])
+  expect(sent.filter(([tag]) => tag === TAG.WINDOW).length).toBeGreaterThan(0)
   // The last answers' acknowledgement goes with the next heartbeat at the latest.
   await run(CHANNEL_PING_INTERVAL_MS + 100)
   expect((server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer.byteLength).toBe(0)
@@ -1317,8 +1350,8 @@ test("the server acknowledges at its heartbeat in its PONG's message, and the pa
   void page.send('x')
   await run(CHANNEL_PING_INTERVAL_MS + 100)
   const sent = loop.sent.server.slice(before)
-  expect(sent.filter(([tag, , bytes]) => tag === TAG.WINDOW && bytes === WINDOW_BYTES)).toEqual([])
-  expect(sent.filter(([tag, , bytes]) => tag === TAG.WINDOW && bytes > WINDOW_BYTES)).toHaveLength(1)
+  expect(alone(sent, TAG.WINDOW)).toEqual([])
+  expect(sent.filter(([tag]) => tag === TAG.WINDOW)).toHaveLength(1)
   expect(pageReplayBytes(page)).toBe(0)
 })
 
@@ -1335,7 +1368,7 @@ test('a page taking a push of 128 KiB messages acknowledges them only in the mes
   const before = loop.sent.page.length
   await push(200)
   const sent = loop.sent.page.slice(before)
-  expect(sent.filter(([tag, , bytes]) => tag === TAG.PIECES_ACK && bytes === PIECES_ACK_BYTES)).toEqual([])
+  expect(alone(sent, TAG.PIECES_ACK)).toEqual([])
   // Its window refreshes carry them.
   expect(sent.filter(([tag]) => tag === TAG.PIECES_ACK).length).toBeGreaterThan(0)
 })

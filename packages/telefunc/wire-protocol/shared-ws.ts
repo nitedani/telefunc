@@ -4,6 +4,10 @@ export {
   ERROR_REASON,
   encode,
   withTook,
+  LENGTH_BYTES,
+  fixedBytes,
+  isOneFrame,
+  messageFrames,
   decode,
   decodeClientFrame,
   assertProtocol,
@@ -67,6 +71,8 @@ import { assert } from '../utils/assert.js'
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
+/** A LENGTH is its header. */
+const LENGTH_BYTES = HEADER
 /** How many seqs a u32 tells apart. */
 const SEQ_SPAN = 2 ** 32
 const PING_ENTRY_BYTES = 6
@@ -114,13 +120,15 @@ const TAG = {
   PIECE: 0x0a as const,
   /** Back, as `PieceReceiver` says, for the frames and pieces that arrived. Payload: u32, the bytes of them it took in
    *  all (mod 2^32), u32, the ms it held the newest, then u32, the µs between the arrival of the newest data and of the
-   *  newest the ack before covered, 0 for the first, or where it covers none. On a WebSocket, a message may carry one
-   *  ahead of another frame (see `PieceSender.carry`). */
+   *  newest the ack before covered, 0 for the first, or where it covers none. */
   PIECES_ACK: 0x0b as const,
   /** Either way on a WebSocket: the bytes of the frames that follow it at once, whole or in pieces, which its receiver
    *  waits for at the rate they arrive (see `pieces.ts`). Payload: u32, their bytes. Its header's seq: the bytes per s
    *  its sender knows the link carries at least, 0 for none. */
   ANNOUNCE: 0x0c as const,
+  /** Either way on a WebSocket, where a message may hold several frames (see `messageFrames`): the bytes of the frame
+   *  after it, which isn't its message's last and whose tag doesn't fix them, as its header's seq. */
+  LENGTH: 0x0d as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -548,6 +556,23 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
+  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message. */
+  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
+    const message = new Uint8Array(bytes)
+    const last = frames.length - 1
+    let at = 0
+    for (let i = 0; i <= last; i++) {
+      const frame = frames[i]!
+      if (i < last && fixedBytes(frame[0]!) === 0) {
+        writeHeader(message.subarray(at), TAG.LENGTH, 0, frame.byteLength)
+        at += HEADER
+      }
+      message.set(frame, at)
+      at += frame.byteLength
+    }
+    assert(at === bytes)
+    return message
+  },
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
@@ -634,6 +659,61 @@ function withTook(heartbeat: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array
 }
 
 // ===== Decode =====
+
+/** The bytes of every frame of `tag`, 0 where they vary. */
+function fixedBytes(tag: number): number {
+  return FIXED_BYTES[tag] ?? 0
+}
+
+const FIXED_BYTES: Partial<Record<number, number>> = {
+  [TAG.FIN]: encode.fin().byteLength,
+  [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
+  [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
+  [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
+  [TAG.CLOSE]: encode.close(0, 0).byteLength,
+  [TAG.CLOSE_ACK]: encode.closeAck(0).byteLength,
+  [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST).byteLength,
+  [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
+  [TAG.BROADCAST_SUB]: encode.broadcastSub(0, false).byteLength,
+  [TAG.BROADCAST_UNSUB]: encode.broadcastUnsub(0, false).byteLength,
+  [TAG.BDP_PING]: encode.bdpPing(0, 0).byteLength,
+  [TAG.BDP_PING_ACK]: encode.bdpPingAck(0, 0, 0, 0).byteLength,
+  [TAG.MSG_WINDOW]: encode.msgWindow(0, 0).byteLength,
+  [TAG.ATTACH_RESULT]: encode.attachResult(0, null).byteLength,
+}
+
+/** Whether a WebSocket `message` holds one frame. */
+function isOneFrame(message: Uint8Array): boolean {
+  const bytes = fixedBytes(message[0]!)
+  return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
+}
+
+/** The frames a WebSocket message of several holds, in order. Each but the last is as long as its tag fixes, or the
+ *  LENGTH ahead of it says, and is whole; the last is the rest. */
+function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
+  const frames: Uint8Array<ArrayBuffer>[] = []
+  const end = message.byteLength
+  let at = 0
+  for (;;) {
+    let bytes = fixedBytes(message[at]!)
+    if (message[at] === TAG.LENGTH) {
+      assertProtocol(end - at > HEADER, 'LENGTH last in its message')
+      bytes = readU32(message, at + 3)
+      at += HEADER
+      assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
+    } else if (bytes === 0 || end - at <= bytes) {
+      frames.push(message.subarray(at))
+      return frames
+    }
+    const tag = message[at]
+    assertProtocol(
+      tag !== TAG.PIECE && tag !== TAG.ANNOUNCE && tag !== TAG.LENGTH,
+      'frame ahead of another it never is',
+    )
+    frames.push(message.subarray(at, at + bytes))
+    at += bytes
+  }
+}
 
 /** Raised for every malformed-bytes path. Never `assert`: that one tells the user they found a
  *  telefunc bug, and these bytes are the peer's. */

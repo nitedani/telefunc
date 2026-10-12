@@ -125,6 +125,7 @@ test('an acknowledgement within one tick of a coarsened clock measures a probe a
   // 2048 B in a tick: a frame that rate carries in 5 s / 8 goes whole.
   const before = transmitted.length
   sender.send(data(1_000_000), 5_000)
+  await flush()
   expect(lengths(transmitted.slice(before))).toEqual([1_000_000])
   expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
   transmitted.length = 0

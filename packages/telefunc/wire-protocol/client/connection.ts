@@ -39,7 +39,7 @@ import {
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
-import { PieceReceiver, PieceSender, carriedBytes } from '../pieces.js'
+import { PieceReceiver, PieceSender } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -50,9 +50,13 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../reque
 import {
   ACK_STATUS,
   ERROR_REASON,
+  LENGTH_BYTES,
   TAG,
   decode,
   encode,
+  fixedBytes,
+  isOneFrame,
+  messageFrames,
   isSequencedFrame,
   isSequencedTag,
   payloadBytes,
@@ -2194,9 +2198,9 @@ class WsTransport implements UpgradeTarget {
     return this.link
   }
 
-  /** What its socket holds unsent, and what its piece sender holds for a probe. */
+  /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number {
-    return (this.ws?.bufferedAmount ?? 0) + (this.pieceSender?.heldBytes ?? 0)
+    return (this.ws?.bufferedAmount ?? 0) + (this.pieceSender?.unhandedBytes ?? 0)
   }
 
   abandonActiveTransport(): void {
@@ -2234,6 +2238,9 @@ class WsTransport implements UpgradeTarget {
 
   dispose(): void {
     this.connecting = false
+    // A socket sends what it was handed before its close.
+    this.probed?.budget.sender.flush()
+    if (this.ws) this.pieceSender?.flush()
     const wsProbed = this.probed?.ws
     this.probed = null
     if (wsProbed) {
@@ -2256,21 +2263,28 @@ class WsTransport implements UpgradeTarget {
 }
 
 /** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PieceReceiver` says, and
- *  hands `take` the frames it carried ahead of its own, then its own, none for a piece before its frame's last. Returns
- *  false where its wire closes: for bytes that close it, before `take` had any, or once `take` returned false. */
+ *  hands `take` its frames, none for a piece before its frame's last. Returns false where its wire closes: for bytes
+ *  that close it, before `take` had any, or once `take` returned false. */
 function receiveMessage(
   pieces: PieceReceiver,
   raw: Uint8Array<ArrayBuffer>,
   at: number,
   take: (frame: DecodedFrame, byteLength: number) => boolean,
 ): boolean {
-  let carried: { frame: DecodedFrame; byteLength: number }[] | undefined
+  // The frames before a message's last ride on it: each taken as it would be alone, but not dated apart from the last.
+  let riding: { frames: Uint8Array<ArrayBuffer>[]; decoded: DecodedFrame[] } | undefined
   let frame: DecodedFrame | null
   try {
-    for (let bytes = carriedBytes(raw); bytes > 0; bytes = carriedBytes(raw)) {
-      ;(carried ??= []).push({ frame: decode(raw.subarray(0, bytes)), byteLength: bytes })
-      pieces.tookCarried(bytes)
-      raw = raw.subarray(bytes)
+    if (!isOneFrame(raw)) {
+      const frames = messageFrames(raw)
+      raw = frames.pop()!
+      riding = { frames, decoded: [] }
+      for (const each of frames) {
+        const decoded = decode(each)
+        pieces.arrived(each.byteLength, isSequencedTag(decoded.tag), at, true)
+        if (fixedBytes(decoded.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+        riding.decoded.push(decoded)
+      }
     }
     frame = decode(raw)
     if (frame.tag === TAG.ANNOUNCE) {
@@ -2287,7 +2301,9 @@ function receiveMessage(
   } catch {
     return false
   }
-  if (carried !== undefined) for (const c of carried) if (!take(c.frame, c.byteLength)) return false
+  if (riding !== undefined)
+    for (let i = 0; i < riding.frames.length; i++)
+      if (!take(riding.decoded[i]!, riding.frames[i]!.byteLength)) return false
   return frame === null || take(frame, raw.byteLength)
 }
 

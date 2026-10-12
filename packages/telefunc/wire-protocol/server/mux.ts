@@ -27,9 +27,13 @@ import {
 import {
   TAG,
   ProtocolViolationError,
+  LENGTH_BYTES,
   assertProtocol,
   decodeClientFrame,
   encode,
+  fixedBytes,
+  isOneFrame,
+  messageFrames,
   isConnCtrlTag,
   isSequencedTag,
   peekTag,
@@ -46,7 +50,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceReceiver, PieceSender, carriedBytes } from '../pieces.js'
+import { PieceReceiver, PieceSender } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from '../link.js'
 import type { ServerChannel } from './channel.js'
@@ -409,44 +413,39 @@ class ChannelMux {
   private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
-    // A WINDOW it carried is handled in turn, as if it came alone: counted as taken here.
-    const carriedWindows: Promise<unknown>[] = []
-    for (let carried = carriedBytes(rawFrame); carried > 0; carried = carriedBytes(rawFrame)) {
-      const frame = rawFrame.subarray(0, carried)
-      rawFrame = rawFrame.subarray(carried)
-      if (!this.takeCarried(entry, connection, frame)) return Promise.resolve(null)
-      if (frame[0] === TAG.WINDOW) carriedWindows.push(this.dispatchFrame(entry, connection, frame, true))
-    }
-    const outcome = this.dispatchFrame(entry, connection, rawFrame, false)
-    return carriedWindows.length === 0 ? outcome : Promise.all(carriedWindows).then(() => outcome)
-  }
-
-  /** Takes a frame a message carried ahead of another, and the PIECES_ACK it is. Returns false if it terminated the
-   *  wire for it. */
-  private takeCarried(entry: ConnectionEntry, connection: Wire, raw: Uint8Array<ArrayBuffer>): boolean {
+    if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
+    let frames: Uint8Array<ArrayBuffer>[]
     try {
-      const { pieces } = entry.state
-      assertProtocol(pieces, 'a frame carried on a wire that takes no pieces')
-      pieces.receiver.tookCarried(raw.byteLength)
-      if (raw[0] !== TAG.PIECES_ACK) return true
-      const ack = decodeClientFrame(raw, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-      assert(ack.tag === TAG.PIECES_ACK)
-      assertProtocol(pieces.sender.acknowledged(ack.bytes, ack.heldMs, ack.spanUs), 'PIECES_ACK for nothing sent')
-      return true
+      assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
+      frames = messageFrames(rawFrame)
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(connection)
-      return false
+      return Promise.resolve(null)
     }
+    // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
+    // measures.
+    const { receiver } = entry.state.pieces
+    let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
+    const last = frames.length - 1
+    for (let i = 0; i <= last; i++) {
+      if (entry.state.closed !== null) return outcome
+      const frame = frames[i]!
+      const dispatched = this.dispatchFrame(entry, connection, frame, i < last ? 'riding' : 'alone')
+      if (frame[0] === TAG.RECONCILE) outcome = dispatched
+      if (i < last && fixedBytes(frame[0]!) === 0) receiver.tookLength(LENGTH_BYTES)
+    }
+    return outcome
   }
 
   /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
-   *  awaitable on the connection. A frame its pieces completed (`pieced`) was counted as they arrived. */
+   *  awaitable on the connection. A frame its pieces completed (`pieced`) was counted as they arrived; one `riding` ahead
+   *  of its message's last isn't dated apart from it (see `PieceReceiver.arrived`). */
   private dispatchFrame(
     entry: ConnectionEntry,
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
-    pieced: boolean,
+    arrival: 'alone' | 'riding' | 'pieced',
   ): Promise<ReconcileOutcome | null> {
     const { state } = entry
     const byteLength = rawFrame.byteLength
@@ -458,8 +457,8 @@ class ChannelMux {
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
     if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, connection, rawFrame)
     const now = performance.now()
-    if (!pieced) {
-      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
+    if (arrival !== 'pieced') {
+      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival === 'riding')
       state.deliveries.note(now, byteLength)
     }
     state.recvBacklogBytes += byteLength
@@ -505,7 +504,7 @@ class ChannelMux {
       return Promise.resolve(null)
     }
     if (frame === null) return Promise.resolve(null)
-    return this.dispatchFrame(entry, connection, frame, true)
+    return this.dispatchFrame(entry, connection, frame, 'pieced')
   }
 
   private receiveAnnounce(
@@ -1158,12 +1157,12 @@ class ChannelMux {
     return allowed - backlog
   }
 
-  /** What its socket holds unsent, and what its piece sender holds for a probe. A wire that's gone holds nothing. */
+  /** What its socket holds unsent, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
   private bufferedAmount(connection: Wire): number | undefined {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
     const socket = entry.transport.bufferedAmount(connection)
-    return socket === undefined ? undefined : socket + (entry.state.pieces?.sender.heldBytes ?? 0)
+    return socket === undefined ? undefined : socket + (entry.state.pieces?.sender.unhandedBytes ?? 0)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {

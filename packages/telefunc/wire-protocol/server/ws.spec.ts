@@ -3,7 +3,7 @@ import type { Peer } from 'crossws'
 import { getTelefuncChannelHooks } from './ws.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { TAG, decode, encode } from '../shared-ws.js'
+import { TAG, decode, encode, isOneFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
@@ -44,9 +44,10 @@ async function attachToStalledPage(websocket: (written: () => number) => object,
     send(message: Uint8Array) {
       written += message.byteLength
       if (!acknowledging) return
-      const frame = decode(message)
-      if (frame.tag === TAG.ANNOUNCE) return
-      const bytes = frame.tag === TAG.PIECE ? frame.piece.byteLength : message.byteLength
+      // A message of several frames holds whole ones.
+      const frame = isOneFrame(message) ? decode(message) : null
+      if (frame?.tag === TAG.ANNOUNCE) return
+      const bytes = frame?.tag === TAG.PIECE ? frame.piece.byteLength : message.byteLength
       if (bytes === 0) return
       took += bytes
       const ack = encode.piecesAck(took, 0, 0)

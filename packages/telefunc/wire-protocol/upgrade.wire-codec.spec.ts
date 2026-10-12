@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import {
   ERROR_REASON,
+  LENGTH_BYTES,
   ProtocolViolationError,
   TAG,
   decode,
@@ -11,6 +12,8 @@ import {
   encodePublishText,
   isChannelCtrlTag,
   isConnCtrlTag,
+  isOneFrame,
+  messageFrames,
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
@@ -264,6 +267,31 @@ describe('heartbeat', () => {
 test('an ANNOUNCE names the bytes that follow it, and the bytes per ms its sender knows the link carries at least', () => {
   expect(clientFrame(encode.announce(4_000, 1_250))).toEqual({ tag: TAG.ANNOUNCE, bytes: 4_000, floor: 1.25 })
   expect(clientFrame(encode.announce(4_000, 0))).toEqual({ tag: TAG.ANNOUNCE, bytes: 4_000, floor: 0 })
+})
+
+describe('several frames in one WebSocket message', () => {
+  test("hold them in order, a LENGTH ahead of each but the last whose tag doesn't fix its bytes", () => {
+    const frames = [
+      encode.window(1, 2, 3),
+      encode.text(1, 'a', 4),
+      encode.piecesAck(5, 6, 7),
+      encode.binary(2, new Uint8Array(3), 8),
+    ]
+    const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
+    expect(isOneFrame(message)).toBe(false)
+    expect(messageFrames(message)).toEqual(frames)
+    expect(frames.map(isOneFrame)).toEqual([true, true, true, true])
+  })
+
+  const malformed: [string, Uint8Array<ArrayBuffer>][] = [
+    ['a PIECE ahead of another frame', encode.message([encode.piece(4, new Uint8Array(4)), encode.closeAck(1)], 29)],
+    ['an ANNOUNCE ahead of another frame', encode.message([encode.announce(0, 0), encode.closeAck(1)], 18)],
+    ['a LENGTH last', encode.message([encode.closeAck(1), encode.closeAck(1)], 14).fill(TAG.LENGTH, 7, 8)],
+    ['a LENGTH past its message', encode.message([encode.text(1, 'a', 1), encode.closeAck(1)], 22).fill(0xff, 3, 7)],
+  ]
+  test.each(malformed)('with %s are a violation', (_name, message) => {
+    expect(() => messageFrames(message)).toThrow(ProtocolViolationError)
+  })
 })
 
 describe('decodeClientFrame — direction', () => {

@@ -43,6 +43,7 @@ function open() {
    *  unacknowledged. */
   const exchange = (bytes: number, spanMs: number) => {
     budget.send(data(bytes), 5_000)
+    budget.sender.flush() // as its turn ends
     sent += bytes
     clock.now += 10
     expect(budget.acknowledged(sent, 0, spanMs * 1_000)).toBe(true)
@@ -126,6 +127,7 @@ test('the longest wait since an instant is what a frame that went at once after 
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   const start = clock.now
   budget.send(data(20_000), 5_000)
+  budget.sender.flush() // as its turn ends
   expect(budget.room).toBeGreaterThan(0)
   budget.send(flowControl(100), 5_000)
   // 20 KB at 100 B/ms: it waited 200 ms, and a frame sent now waits behind its 100 B too.
