@@ -42,7 +42,7 @@ function replayWindow(text: number, binary: number): number {
  *   1. **Byte credit** (`WINDOW` frame) bounds in-flight memory.
  *   2. **Message-count credit** (`MSG_WINDOW` frame) bounds
  *      in-flight per-RTT *message count* regardless of size.
- *   3. **Self-utilisation gate**: `_recordSelfTime(ms)` accumulates this channel's
+ *   3. **Self-utilisation gate**: `_recordSelfTime(t0)` accumulates this channel's
  *      sync work into a two-bucket rolling sum. Above `FC_SELF_UTIL_THRESHOLD`,
  *      `onPingAck` refuses to grow either window and `decrement` yields a
  *      macrotask before returning, as it does once per `yieldBytes` sent.
@@ -223,13 +223,13 @@ class FlowControl {
     return backlog
   }
 
-  /** Receiver-side: account one received frame off the wire. Emits a
+  /** Receiver-side: account one received frame off the wire, received at `at` on `performance.now()`'s clock. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
-  onReceived(bytes: number): void {
+  onReceived(bytes: number, at: number): void {
     this._arrived = true
     this._receivedBytes += bytes
     this._link?.creditArrived(bytes)
-    if (this._bdp.onReceive(bytes, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, at, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `link`, which the peer answers before
@@ -294,19 +294,20 @@ class FlowControl {
     }
   }
 
-  /** Channel calls this after the sync portion of a send or a receive-dispatch
-   *  to report how much wall-clock that work consumed. */
-  _recordSelfTime(durationMs: number): void {
-    this._advanceBuckets()
-    this._curBucket += Math.min(durationMs, FC_SELF_TIME_WINDOW_MS)
+  /** Channel calls this after the sync portion of a send or a receive-dispatch, which started at `t0` on
+   *  `performance.now()`'s clock, to report how much wall-clock that work consumed. */
+  _recordSelfTime(t0: number): void {
+    const now = performance.now()
+    this._advanceBuckets(now)
+    this._curBucket += Math.min(now - t0, FC_SELF_TIME_WINDOW_MS)
   }
 
   /** Telefunc's share of wall-clock time on this channel over the last
    *  `FC_SELF_TIME_WINDOW_MS`, in [0, 1]. While the channel is younger than the
    *  window, denominates by lifetime instead. */
   private _selfUtilisation(): number {
-    this._advanceBuckets()
     const now = performance.now()
+    this._advanceBuckets(now)
     const phase = (now - this._curBucketStart) / FC_SELF_TIME_WINDOW_MS
     const effectiveMs = this._prevBucket * (1 - phase) + this._curBucket
     const denom = Math.min(now - this._openedAt, FC_SELF_TIME_WINDOW_MS)
@@ -315,8 +316,7 @@ class FlowControl {
     return util > 1 ? 1 : util
   }
 
-  private _advanceBuckets(): void {
-    const now = performance.now()
+  private _advanceBuckets(now: number): void {
     const elapsed = now - this._curBucketStart
     if (elapsed < FC_SELF_TIME_WINDOW_MS) return
     if (elapsed < 2 * FC_SELF_TIME_WINDOW_MS) {
@@ -401,7 +401,11 @@ class FlowControl {
   private _refresh(): void {
     const bytes = this._consumedBytes - this._advertisedBytes >= this._bdp.byteWindow >> 2
     const messages = this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2
-    if (!bytes && !messages) return
+    if (bytes || messages) this._advertiseDue(bytes, messages)
+  }
+
+  /** Sends the limits due, once the wire's share allows. */
+  private _advertiseDue(bytes: boolean, messages: boolean): void {
     const wait = this._link?.refreshes.wait() ?? 0
     if (wait > 0) {
       this._link!.noteWait(wait)

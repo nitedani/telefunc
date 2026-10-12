@@ -470,7 +470,7 @@ class ChannelMux {
     const exec = (): Promise<ReconcileOutcome | null> =>
       this.runInboundTurn(entry, connection, rawFrame, byteLength, delivery)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
-    this.answerArrival(entry, connection)
+    this.answerArrival(entry, connection, now)
     return this.chainRecv(entry, exec)
   }
 
@@ -483,7 +483,7 @@ class ChannelMux {
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
-    this.answerArrival(entry, connection)
+    this.answerArrival(entry, connection, now)
     const { state } = entry
     let frame: Uint8Array<ArrayBuffer> | null
     try {
@@ -533,14 +533,15 @@ class ChannelMux {
   onConnectionBytes(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    entry.state.lastReceivedAt = performance.now()
-    this.answerArrival(entry, connection)
+    const now = performance.now()
+    entry.state.lastReceivedAt = now
+    this.answerArrival(entry, connection, now)
   }
 
   // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
   // is answered all the same, once a ping interval, so the page knows they arrive.
-  private answerArrival(entry: ConnectionEntry, connection: Wire): void {
-    if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
+  private answerArrival(entry: ConnectionEntry, connection: Wire, now: number): void {
+    if (now - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
 
   /** Control frames are bounded by what the protocol itself can describe; only the data plane carries user payloads and

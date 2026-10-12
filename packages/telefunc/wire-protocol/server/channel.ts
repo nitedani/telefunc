@@ -212,7 +212,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -261,7 +261,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -526,7 +526,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const data = parsePeerText(text) as ChannelData<ClientToServer>
       const validateData = this._validators.get('data')
       // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
@@ -556,7 +556,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -574,7 +574,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     const bytes = data.byteLength
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {
@@ -592,7 +592,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
