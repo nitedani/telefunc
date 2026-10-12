@@ -92,6 +92,8 @@ class FlowControl {
   private _arrived = false
   /** It grants the largest byte window its peer's replay allows (see `widenByteWindow`). */
   private _widened = false
+  /** It attached on a wire. */
+  private _wired = false
   /** Senders waiting on credit, oldest first. */
   private readonly _waiters = new Fifo<() => void>()
   /** A waiter was handed the credit and no send was counted since. */
@@ -324,10 +326,16 @@ class FlowControl {
     this._bdp.attach(link)
   }
 
-  /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits go out again,
-   *  which repairs what the prior wire lost of them. Credit carries over: it is cumulative. */
+  /** Attach on another wire than the last, or the first. The probe in flight rode the prior wire, and the limits go out
+   *  again, which repairs what the prior wire lost of them. Credit carries over: it is cumulative. On the first wire the
+   *  peer starts with the initial limits, so only a byte limit past them, or one that acknowledges what arrived, goes. */
   reattach(): void {
     this._bdp.reset()
+    if (!this._wired) {
+      this._wired = true
+      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) this._advertiseBytes()
+      return
+    }
     this._advertiseBytes()
     this._advertiseMessages()
   }

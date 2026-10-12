@@ -708,48 +708,33 @@ describe('with every channel registered, a page sends each message once, and no 
   })
 })
 
-const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
+const { RECONCILE, RECONCILED, TEXT, WINDOW, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
 /** Every frame each wire carries for two returned channels and one message each way, PING and PONG aside: no frame
  *  or request more than needed. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
-    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, RECONCILE, BDP_PING],
     toPage: [
       STREAM_REQUEST_OPEN_ACK,
-      WINDOW,
-      MSG_WINDOW,
       BDP_PING,
       RECONCILED,
       WINDOW,
       TEXT,
       BDP_PING_ACK,
       BDP_PING_ACK,
-      WINDOW,
-      MSG_WINDOW,
       RECONCILED,
       BDP_PING_ACK,
     ],
   },
   'sse-batch': {
     requests: 5,
-    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, WINDOW, MSG_WINDOW],
-    toPage: [WINDOW, MSG_WINDOW, BDP_PING, RECONCILED, WINDOW, TEXT, WINDOW, MSG_WINDOW, BDP_PING_ACK, RECONCILED],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, RECONCILE, BDP_PING, WINDOW],
+    toPage: [BDP_PING, RECONCILED, WINDOW, TEXT, BDP_PING_ACK, RECONCILED],
   },
   ws: {
     requests: 1,
-    toServer: [RECONCILE, TEXT, WINDOW, MSG_WINDOW, BDP_PING_ACK, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW],
-    toPage: [
-      BDP_PING_ACK,
-      WINDOW,
-      MSG_WINDOW,
-      RECONCILED,
-      BDP_PING,
-      TEXT,
-      WINDOW,
-      MSG_WINDOW,
-      RECONCILED,
-      BDP_PING_ACK,
-    ],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, RECONCILE, BDP_PING],
+    toPage: [BDP_PING_ACK, RECONCILED, BDP_PING, TEXT, RECONCILED, BDP_PING_ACK],
   },
 }

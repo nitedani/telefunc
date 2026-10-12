@@ -392,6 +392,7 @@ describe('FlowControl — reattach', () => {
   // receive window grown by BDP is kept too (the link's BDP doesn't change across transport hiccups).
   it('keeps credit and the grown receive window, and advertises the limits again', () => {
     const { flow, emit } = makeFlow()
+    flow.reattach() // the first wire
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)

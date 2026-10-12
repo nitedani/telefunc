@@ -1194,6 +1194,17 @@ test('a push of 4 KiB messages on a fresh wire whose floor carries them within a
   expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE || tag === TAG.ANNOUNCE)).toEqual([])
 })
 
+test("a channel's first attach sends no window either way: each side starts with the initial limits", async () => {
+  const { page } = loop.open<string, string>()
+  let opened = false
+  page.onOpen(() => (opened = true))
+  await runUntil(() => opened, 1_000)
+  await run(100)
+  const windows = (sent: [number, number, number][]) =>
+    sent.filter(([tag]) => tag === TAG.WINDOW || tag === TAG.MSG_WINDOW).map(([tag]) => tag)
+  expect([windows(loop.sent.page), windows(loop.sent.server)]).toEqual([[], []])
+})
+
 test.each([16, 64, 256])(
   'a page that sends %i KiB messages, each once the answer to the one before arrived, gets each answer a round trip after it sends it',
   async (kib) => {
