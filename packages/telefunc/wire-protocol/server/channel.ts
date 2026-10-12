@@ -911,23 +911,26 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._fireClose(err)
     this._flow.shutdown()
     this._notifyCloseProgress()
-    const ackErr = err ?? new ChannelClosedError()
-    for (const { reject } of this._pendingAcks.values()) reject(ackErr)
+    // Building an error captures its stack: one is built only where an answer is awaited.
+    if (this._pendingAcks.size > 0 || this._prePeerBuffer.size > 0) {
+      const ackErr = err ?? new ChannelClosedError()
+      for (const { reject } of this._pendingAcks.values()) reject(ackErr)
+      // What it keeps for its page takes no answer.
+      this._prePeerBuffer.rejectAcks(ackErr)
+    }
     this._pendingAcks.clear()
     this._pendingAckBytes = 0
-    // What it keeps for its page takes no answer.
-    this._prePeerBuffer.rejectAcks(ackErr)
   }
 
   /** @internal Drops what the channel keeps for its page: its replay, and what it made while no peer was attached. */
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
-    this._dropPending(this._closeError ?? new ChannelClosedError())
+    this._dropPending(this._prePeerBuffer.size === 0 ? undefined : (this._closeError ?? new ChannelClosedError()))
   }
 
   /** What was sent while no peer was attached rejects with `err`. */
-  private _dropPending(err: Error): void {
+  private _dropPending(err?: Error): void {
     this._prePeerBuffer.clear(err)
     this._pendingAckRes.length = 0
     this._pendingEnd = NO_PENDING_END

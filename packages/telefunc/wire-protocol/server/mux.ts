@@ -253,10 +253,11 @@ class ChannelMux {
   private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
     const timer = this.endedChannels.get(channel)
     if (timer) clearTimeout(timer)
-    const { reconnectTimeout } = getServerConfig().channel
     this.endedChannels.set(
       channel,
-      pageAttached ? null : unrefTimer(setTimeout(() => this.releaseEnded(channel), reconnectTimeout)),
+      pageAttached
+        ? null
+        : unrefTimer(setTimeout(() => this.releaseEnded(channel), getServerConfig().channel.reconnectTimeout)),
     )
   }
 
