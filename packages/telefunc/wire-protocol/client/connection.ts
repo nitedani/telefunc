@@ -226,6 +226,8 @@ interface MuxChannel {
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `link`, whose flow-control frames wait
    *  for a batched POST when `batched`. */
   _reattachState(link: Link, batched: boolean): ReattachState
+  /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
+  _onProbeAnswered(probe: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
   _fitReplays(window: number, peerWindow: number): void
   /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
@@ -486,6 +488,8 @@ class ClientConnection implements MuxConnection {
   private nextIndex = 0
   /** What the RECONCILE in flight lists, and whether as `initial`. */
   private reconcileIxes = new Map<number, boolean>()
+  /** The probes the RECONCILE in flight carries, by channel: its RECONCILED answers each a BDP_PING_ACK didn't. */
+  private reconcileProbes = new Map<number, number>()
   /** Initial channels a RECONCILED left out because the server hadn't registered them, until their ATTACH_RESULT, which
    *  comes on the wire awaiting them, the old one or, after a barrier, the WebSocket. What they queue waits for it, so
    *  their replay goes first. */
@@ -1248,6 +1252,7 @@ class ClientConnection implements MuxConnection {
       if (ctrl.upgradeId !== committing.upgradeId) return
       committing.committed = true
     }
+    for (const [ix, probe] of this.reconcileProbes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
     this.transport.applyReconciledSettings(ctrl)
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
@@ -1504,6 +1509,7 @@ class ClientConnection implements MuxConnection {
     this.awaitedIxes.clear()
     this.earlyAttachResults.clear()
     this.reconcileIxes.clear()
+    this.reconcileProbes.clear()
     this.exitReconciling()
   }
 
@@ -1571,6 +1577,7 @@ class ClientConnection implements MuxConnection {
   }): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.reconcileIxes = new Map()
+    this.reconcileProbes = new Map()
     this.carriedFrom = new Map()
     const open: ReconcileOpenEntry[] = []
     const subscribing = new Set<number>()
@@ -1590,6 +1597,7 @@ class ClientConnection implements MuxConnection {
       }
       if (isInitial) payloadEntry.initial = true
       const state = entry.channel._reattachState(link, batched)
+      if (state.probe !== undefined) this.reconcileProbes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
       open.push(payloadEntry)

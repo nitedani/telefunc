@@ -227,8 +227,8 @@ type ReconcileOpenEntry = {
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
   broadcast?: { text: boolean; binary: boolean }
-  /** A BDP probe's number, which the server answers as it reads the entry, ahead of what the attach sends of the
-   *  channel: on another wire than the last, the ack queues behind none of the channel's data, so its round trip is the
+  /** A BDP probe's number, which the RECONCILED answers, or a BDP_PING_ACK ahead of a frame the server sends before it:
+   *  on another wire than the last, the answer queues behind none of the channel's data, so its round trip is the
    *  path's. */
   probe?: number
 }

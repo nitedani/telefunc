@@ -173,6 +173,9 @@ type ConnectionState = {
   attaching: Set<ServerChannel>
   /** How long the frames that go at once wait behind what the socket holds. */
   wait: SocketWait
+  /** The probed entries of the RECONCILE it reads, until its RECONCILED answers them: a frame that goes ahead of that
+   *  goes behind a BDP_PING_ACK for each. */
+  probed: ReconcileOpenEntry[]
 }
 
 type ConnectionEntry = {
@@ -301,6 +304,7 @@ class ChannelMux {
         pastSendBacklog: false,
         attaching: new Set(),
         wait,
+        probed: [],
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
@@ -331,6 +335,8 @@ class ChannelMux {
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
+    const state = this.connectionEntries.get(outcome.deliverTo)?.state
+    if (state) state.probed = []
     this.send(
       outcome.deliverTo,
       encode.reconciled({
@@ -840,9 +846,9 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle | null {
-    // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
-    // path's. It measures, so it says no credit ran out, and names no round trip.
-    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, Infinity, Infinity))
+    // Answered ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip
+    // is the path's.
+    if (entry.probe !== undefined) conn.state.probed.push(entry)
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
@@ -1070,6 +1076,7 @@ class ChannelMux {
     if (!entry) return
     const { state } = entry
     if (state.pastSendBacklog) return
+    if (state.probed.length > 0 && frame[0] !== TAG.RECONCILED) this.answerProbes(connection, state)
     if (frame[0] === TAG.ACK_RES) state.pieces?.receiver.answering()
     if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
     if (frame.byteLength > state.sendHeadroom) {
@@ -1084,6 +1091,14 @@ class ChannelMux {
     state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
     if (state.pieces) state.pieces.sender.send(frame, this.options.pingInterval)
     else entry.transport.sendNow(connection, frame)
+  }
+
+  /** Answers the probes of the RECONCILE it reads, ahead of a frame that would go ahead of its RECONCILED. An answer
+   *  measures, so it says no credit ran out, and names no round trip. */
+  private answerProbes(connection: Wire, state: ConnectionState): void {
+    const probed = state.probed
+    state.probed = []
+    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe!, Infinity, Infinity))
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't

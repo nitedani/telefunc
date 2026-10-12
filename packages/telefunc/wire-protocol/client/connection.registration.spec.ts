@@ -715,17 +715,7 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
     toServer: [RECONCILE, TEXT, BDP_PING_ACK, RECONCILE, BDP_PING],
-    toPage: [
-      STREAM_REQUEST_OPEN_ACK,
-      BDP_PING,
-      RECONCILED,
-      WINDOW,
-      TEXT,
-      BDP_PING_ACK,
-      BDP_PING_ACK,
-      RECONCILED,
-      BDP_PING_ACK,
-    ],
+    toPage: [STREAM_REQUEST_OPEN_ACK, BDP_PING, RECONCILED, WINDOW, TEXT, RECONCILED, BDP_PING_ACK],
   },
   'sse-batch': {
     requests: 5,
@@ -735,6 +725,6 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   ws: {
     requests: 1,
     toServer: [RECONCILE, TEXT, BDP_PING_ACK, RECONCILE, BDP_PING],
-    toPage: [BDP_PING_ACK, RECONCILED, BDP_PING, TEXT, RECONCILED, BDP_PING_ACK],
+    toPage: [RECONCILED, BDP_PING, TEXT, RECONCILED, BDP_PING_ACK],
   },
 }

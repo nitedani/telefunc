@@ -1205,6 +1205,18 @@ test("a channel's first attach sends no window either way: each side starts with
   expect([windows(loop.sent.page), windows(loop.sent.server)]).toEqual([[], []])
 })
 
+test("a fresh wire's attach measures the path's round trip by the RECONCILED, with no answer to its probe beside it", async () => {
+  const { page } = loop.open<string, string>()
+  let opened = false
+  page.onOpen(() => (opened = true))
+  await runUntil(() => opened, 1_000)
+  expect(loop.sent.server.filter(([tag]) => tag === TAG.BDP_PING_ACK)).toEqual([])
+  expect(
+    (page as unknown as { _connection: { transport: { link: { pathRtt: number } } } })._connection.transport.link
+      .pathRtt,
+  ).toBe(2 * LATENCY_MS)
+})
+
 test.each([16, 64, 256])(
   'a page that sends %i KiB messages, each once the answer to the one before arrived, gets each answer a round trip after it sends it',
   async (kib) => {

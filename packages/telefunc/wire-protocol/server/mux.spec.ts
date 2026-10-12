@@ -272,9 +272,9 @@ test("what a reconnect's RECONCILE sends a channel's page, run once its wire clo
   expect(count(live, TAG.ABORT)).toBe(1)
 })
 
-// The ack of an attach's probe measures the path's round trip, so it goes out as the server reads the entry: held
-// until the channel registers, it would count the wait for its call.
-test("an attach's probe is answered as the RECONCILE naming it is read, for a channel the server awaits too", async () => {
+// The answer to an attach's probe measures the path's round trip, so nothing of the channel goes ahead of it, and it
+// doesn't wait for the channel's registration: held until then, it would count the wait for its call.
+test("an attach's probe is answered by the RECONCILED, for a channel the server awaits too", async () => {
   const mux = new ChannelMux()
   mux.registerChannel(new ServerChannel({ id: 'known' }))
   const { open, sent } = wires(mux)
@@ -288,13 +288,31 @@ test("an attach's probe is answered as the RECONCILE naming it is read, for a ch
       ],
     }),
   )
-  const acks = sent
-    .get(wire)!
-    .flatMap((frame) => (frame.tag === TAG.BDP_PING_ACK ? [[frame.index, frame.probe, frame.backlog]] : []))
-  expect(acks).toEqual([
-    [0, 7, Infinity],
-    [1, 8, Infinity],
-  ])
+  expect(sent.get(wire)!.map((frame) => frame.tag)).toEqual([TAG.RECONCILED])
+  mux.registerChannel(new ServerChannel({ id: 'late' }))
+})
+
+test("a frame the server sends ahead of the RECONCILED goes behind the answers to the attach's probes", async () => {
+  const mux = new ChannelMux()
+  const known = new ServerChannel<unknown, string>({ id: 'known' })
+  mux.registerChannel(known)
+  void known.send('early')
+  const { open, sent } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({
+      open: [
+        { id: 'late', ix: 0, lastSeq: 0, initial: true, probe: 7 },
+        { id: 'known', ix: 1, lastSeq: 0, initial: true, probe: 8 },
+      ],
+    }),
+  )
+  expect(
+    sent
+      .get(wire)!
+      .map((frame) => (frame.tag === TAG.BDP_PING_ACK ? [frame.tag, frame.probe, frame.backlog] : frame.tag)),
+  ).toEqual([[TAG.BDP_PING_ACK, 7, Infinity], [TAG.BDP_PING_ACK, 8, Infinity], TAG.TEXT, TAG.RECONCILED])
   mux.registerChannel(new ServerChannel({ id: 'late' }))
 })
 
