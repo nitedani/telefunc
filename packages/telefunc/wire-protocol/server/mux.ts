@@ -377,6 +377,7 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
+    entry.state.pieces?.sender.close()
     this.clearPingTimer(entry.state)
     this.stopAwaiting(entry.state)
     this.connectionEntries.delete(connection)
