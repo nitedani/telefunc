@@ -82,18 +82,19 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const pinnedAt = new Map<string, number>()
   let sessionKV: KVNamespace | undefined
 
-  /** The Worker routes a token by its KV pin, so a page's requests from elsewhere reach the Durable Object that serves
-   *  it, which writes it: once, and again before KV lets it lapse, where a Worker missing KV's cached lookup would write
-   *  it on every request of the page's first minute. */
+  /** The Worker routes a token by its KV pin. The session Durable Object writes the pin, once and again before it
+   *  lapses: a Worker, whose KV reads are cached, would see no pin and write it on each request of the page's first
+   *  minute. */
   function pinSession(request: Request): void {
     const token = request.headers.get(TELEFUNC_SESSION_HEADER)
-    const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-    const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
     const kv = sessionKV
-    if (!token || !shard || !bucket || !kv) return
+    if (!token || !kv) return
     const now = Date.now()
     const at = pinnedAt.get(token)
     if (at !== undefined && now - at < SHARD_TOKEN_REPIN_MS) return
+    const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
+    const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
+    if (!shard || !bucket) return
     pinnedAt.delete(token)
     pinnedAt.set(token, now)
     for (const [oldToken, oldAt] of pinnedAt) {
