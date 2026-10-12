@@ -981,17 +981,16 @@ class ClientConnection implements MuxConnection {
    *  before, with nothing left to replay or to send, is let go instead: nothing it holds can reach the server now. */
   private buildPing(): Uint8Array<ArrayBuffer> {
     const ended: PingEntry[] = []
-    let queuedIxes: Set<number> | undefined
+    let queued: Set<number> | undefined
     for (const [ix, entry] of this.channels) {
       const state = entry.state
       if (state.tag !== 'closed' || state.initial) continue
-      if (
-        state.reported &&
-        this.replayBuffers.get(ix)!.length === 0 &&
-        !(queuedIxes ??= new Set([...this.queued(), ...this.heldForRoom].map(({ channelIx }) => channelIx))).has(ix)
-      ) {
-        this.releaseChannel(ix, entry.channel)
-        continue
+      if (state.reported && this.replayBuffers.get(ix)!.length === 0) {
+        queued ??= this.queuedIxes()
+        if (!queued.has(ix)) {
+          this.releaseChannel(ix, entry.channel)
+          continue
+        }
       }
       state.reported = true
       ended.push({ ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 })
@@ -1763,6 +1762,14 @@ class ClientConnection implements MuxConnection {
       this.heldForRoomBytes = 0
     }
     return this.sendBuffer
+  }
+
+  /** The channels whose frames wait to go. */
+  private queuedIxes(): Set<number> {
+    const ixes = new Set<number>()
+    for (const { channelIx } of this.queued()) ixes.add(channelIx)
+    for (const { channelIx } of this.heldForRoom) ixes.add(channelIx)
+    return ixes
   }
 
   private dropQueues(): void {
