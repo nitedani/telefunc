@@ -288,6 +288,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow.acknowledge()
   }
 
+  /** @internal See `FlowControl.answered`. */
+  _answered(): void {
+    this._flow.answered()
+  }
+
   /** @internal */
   _onTransportBatched(): void {
     if (!this._isClosed) this._flow.useBatchTransportInitial()

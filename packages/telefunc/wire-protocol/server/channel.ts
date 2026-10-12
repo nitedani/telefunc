@@ -467,6 +467,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
+        this._onPageHas(frame.ackedSeq)
         this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         return
       case TAG.PUBLISH:
@@ -776,6 +777,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     if (this._peer) {
       this._peer.sendAckRes(ackedSeq, result, status)
+      if (ackedSeq === this._lastClientSeq) this._flow.answered()
     } else {
       this._pendingAckRes.push({ ackedSeq, result, status })
     }

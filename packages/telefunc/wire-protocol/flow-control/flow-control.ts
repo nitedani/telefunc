@@ -263,6 +263,13 @@ class FlowControl {
     if (this._arrived) this._advertiseBytes()
   }
 
+  /** Receiver-side: this side answered the newest frame that arrived, which tells the sender it has every frame before
+   *  it too, so no `WINDOW` is owed for them. */
+  answered(): void {
+    this._uncountedBytes = 0
+    this._arrived = false
+  }
+
   /** Settle `BDP_PING_ACK`, which says the least the peer's wire held whenever its credit ran out, and the path's round
    *  trip as the peer measured it. `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived.
    *  Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's

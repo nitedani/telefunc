@@ -35,6 +35,7 @@ function createChannel(id = crypto.randomUUID()) {
     _reattachState: () => ({}),
     _fitReplays() {},
     _acknowledge() {},
+    _answered() {},
   }
 }
 

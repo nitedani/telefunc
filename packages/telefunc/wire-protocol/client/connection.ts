@@ -233,6 +233,8 @@ interface MuxChannel {
   /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
    *  quiet. */
   _acknowledge(): void
+  /** It answered the newest frame the server sent it, which acknowledges every frame before it too. */
+  _answered(): void
 }
 
 interface MuxConnection {
@@ -819,6 +821,7 @@ class ClientConnection implements MuxConnection {
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
     this.sendOrQueue(ix, seq, encode.ackRes(ix, seq, ackedSeq, result, status), 'ack')
+    if (ackedSeq === this.lastSeqByChannel.get(ix)) channel._answered()
   }
 
   sendAbort(channel: MuxChannel, abortValue: string): void {
@@ -957,6 +960,7 @@ class ClientConnection implements MuxConnection {
       if (this.trackSeq(frame.index, frame.seq) === 'dup') return
     }
     if (frame.tag === TAG.WINDOW) this.serverHasThrough(frame.index, this.sentThrough(frame.index, frame.lastSeq))
+    if (frame.tag === TAG.ACK_RES) this.serverHasThrough(frame.index, frame.ackedSeq)
     // Connection-level + channel-termination ctrls and ATTACH_RESULT stay here; they involve connection
     // bookkeeping (upgrade state, channel release, TTL). Everything else is per-channel and goes through
     // `channel._dispatchFrame`.

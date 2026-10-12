@@ -1254,6 +1254,33 @@ test("the server acknowledges a page's message in the message of its answer", as
   expect(acks.map(([tag, , bytes]) => [tag, bytes > PIECES_ACK_BYTES])).toEqual(Array(10).fill([TAG.PIECES_ACK, true]))
 })
 
+test.each(['page', 'server'] as const)(
+  "the %s's requests are acknowledged by their answers: its replay lets them go, and its peer sends no window for them",
+  async (asker) => {
+    const { server, page } = loop.open<Uint8Array, Uint8Array>()
+    const [from, to] = asker === 'page' ? [page, server] : [server, page]
+    to.listenBinary(() => 'ok')
+    await run(100)
+    const before = { page: loop.sent.page.length, server: loop.sent.server.length }
+    for (let i = 0; i < 10; i++) {
+      let answered = false
+      void from.sendBinary(new Uint8Array(256 * KIB), { ack: true }).then(() => (answered = true))
+      while (!answered) await run(1)
+    }
+    const answerer = asker === 'page' ? 'server' : 'page'
+    expect(loop.sent[answerer].slice(before[answerer]).filter(([tag]) => tag === TAG.WINDOW)).toEqual([])
+    const replay =
+      asker === 'page'
+        ? [
+            ...(
+              page as unknown as { _connection: { replayBuffers: Map<number, { byteLength: number }> } }
+            )._connection.replayBuffers.values(),
+          ][0]!
+        : (server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer
+    expect(replay.byteLength).toBe(0)
+  },
+)
+
 test('a page taking a push of 128 KiB messages acknowledges them only in the messages it sends anyway, once the server measured the rate', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   let got = 0
