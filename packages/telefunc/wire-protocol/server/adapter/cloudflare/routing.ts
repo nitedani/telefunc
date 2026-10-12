@@ -108,10 +108,9 @@ function resolveSessionRoutingTarget(
   if (getScaleCountForBucket(scale, locationBucket) === 0) {
     locationBucket = locationFallback
   }
-  const shardIndices = getShardIndicesForBucket(scale, locationBucket)
   // By the session's token, so its calls and channels reach one shard even without a KV entry (a first call's, or a
   // lapsed one's).
-  const shardOrdinal = shardIndices[getDeterministicKeyBucketIndex(token, shardIndices.length)]!
+  const shardOrdinal = getDeterministicKeyBucketIndex(token, getBucketScale(scale, locationBucket))
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 
   return { sessionInstanceName, locationBucket, shardOrdinal }
