@@ -33,6 +33,8 @@ import { isTelefuncRequest } from './shared.js'
 const SHARD_TOKEN_TTL_SECONDS = 86400
 /** A session Durable Object writes its pin again once it's this old, well before KV lets it lapse. */
 const SHARD_TOKEN_REPIN_MS = (SHARD_TOKEN_TTL_SECONDS * 1000) / 2
+/** KV takes one write a second to a key. */
+const SHARD_TOKEN_RETRY_MS = 1000
 
 type CloudflareOptions = {
   bindingName?: string
@@ -78,8 +80,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  /** When each session token this isolate's Durable Objects serve was last pinned in KV, oldest first. */
-  const pinnedAt = new Map<string, number>()
+  /** When each session token this isolate's Durable Objects serve is due to be pinned in KV, in the order they were
+   *  pinned. */
+  const pinDueAt = new Map<string, number>()
   let sessionKV: KVNamespace | undefined
 
   /** The Worker routes a token by its KV pin. The session Durable Object writes the pin, once and again before it
@@ -90,25 +93,25 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     const kv = sessionKV
     if (!token || !kv) return
     const now = Date.now()
-    const at = pinnedAt.get(token)
-    if (at !== undefined && now - at < SHARD_TOKEN_REPIN_MS) return
+    const due = pinDueAt.get(token)
+    if (due !== undefined && now < due) return
     const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
     const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
     if (!shard || !bucket) return
-    pinnedAt.delete(token)
-    pinnedAt.set(token, now)
-    for (const [oldToken, oldAt] of pinnedAt) {
-      if (now - oldAt < SHARD_TOKEN_TTL_SECONDS * 1000) break
-      pinnedAt.delete(oldToken)
+    pinDueAt.delete(token)
+    pinDueAt.set(token, now + SHARD_TOKEN_REPIN_MS)
+    for (const [oldToken, oldDue] of pinDueAt) {
+      if (now < oldDue) break
+      pinDueAt.delete(oldToken)
     }
     const pin: StoredShardToken = { s: shard, b: bucket }
     // A Durable Object lives on while the write is pending.
     kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(
       (err: unknown) => {
-        pinnedAt.delete(token)
+        pinDueAt.set(token, Date.now() + SHARD_TOKEN_RETRY_MS)
         assertWarning(
           false,
-          `A session's shard couldn't be pinned in KV, and is retried on its next request: ${String(err)}`,
+          `A session's shard couldn't be pinned in KV, and is retried after a second: ${String(err)}`,
           {
             onlyOnce: false,
           },

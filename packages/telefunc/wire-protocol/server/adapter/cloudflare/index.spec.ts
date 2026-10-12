@@ -466,7 +466,7 @@ describe("the session Durable Object's pin", () => {
     expect(put).toHaveBeenCalledTimes(2)
   })
 
-  it('reports a pin it failed to write, and writes it on the next request', async () => {
+  it("reports a pin it failed to write, and writes it again on the token's first request a second later, as KV takes a key's writes", async () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put').mockRejectedValueOnce(new Error('KV is down'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -475,6 +475,14 @@ describe("the session Durable Object's pin", () => {
     await flush()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('KV is down'))
     await request('token-b')
+    await flush()
+    expect(put).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers({ now: Date.now() + 1000 })
+    try {
+      await request('token-b')
+    } finally {
+      vi.useRealTimers()
+    }
     await flush()
     expect(put).toHaveBeenCalledTimes(2)
     warn.mockRestore()
