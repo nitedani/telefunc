@@ -34,30 +34,7 @@ function replayWindow(text: number, binary: number): number {
   return Math.max(1, Math.floor(Math.min(text, binary) / 2))
 }
 
-/**
- * Per-channel flow control. Two orthogonal credit axes coordinated by a single
- * BDP probe per RTT, plus a self-utilisation gate that applies symmetrically
- * to growth (receiver-side) and to outbound pacing (sender-side).
- *
- *   1. **Byte credit** (`WINDOW` frame) bounds in-flight memory.
- *   2. **Message-count credit** (`MSG_WINDOW` frame) bounds
- *      in-flight per-RTT *message count* regardless of size.
- *   3. **Self-utilisation gate**: `_recordSelfTime(t0)` accumulates this channel's
- *      sync work into a two-bucket rolling sum. Above `FC_SELF_UTIL_THRESHOLD`,
- *      `onPingAck` refuses to grow either window and `decrement` yields a
- *      macrotask before returning, as it does once per `yieldBytes` sent.
- *
- * Limits are cumulative, as QUIC's MAX_DATA: the receiver advertises what it has consumed plus its window, and the
- * sender's credit is that limit minus what it has sent, so what is still in flight counts against it. Totals are exact
- * here, and limits travel mod 2^32: a limit off the wire is read as its signed 32-bit distance from the one it updates.
- *
- * Senders waiting on credit get it one at a time, oldest first: while others wait, a send that leaves credit hands it
- * to the next and waits behind them. So senders that each await their sends, once waiting, pass the limit by one
- * frame together. Senders still sending freely as the credit runs out each have a frame out past it.
- *
- * Until `fitReplays` says the replay buffers that bound its windows, it advertises no byte limit, so its peer's
- * assumption of the initial one stands: its peer's replay couldn't keep what a larger window let be in flight.
- */
+/** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
 class FlowControl {
   private _bdp = new BdpEstimator()
   /** The wire of the last `attach`. */

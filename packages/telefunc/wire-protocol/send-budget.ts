@@ -18,29 +18,7 @@ import { unrefTimer } from '../utils/unrefTimer.js'
 /** How much of the excess queue a round of acknowledgements sheds. */
 const SHED_SHARE = 0.5
 
-/** How many bytes of data a page lets its WebSocket's queues hold: the browser's, the network stack's and the path's,
- *  where it can't see them or reorder them, and where a flow-control frame waits behind the data sent before it. A
- *  download whose refreshes wait behind an upload crawls. The page hands data to the socket while the allowance has
- *  room, and holds the rest back: its piece sender cuts a frame past the room into pieces as the room opens, and the
- *  frames that don't wait pass it.
- *
- *  The room is the allowance less what the uplink holds, or less what the server hasn't acknowledged where that is more,
- *  but for what late acknowledgements hide and what the server takes before it acknowledges. An acknowledgement waits
- *  behind what the server sends, as long as what the download's credit lets the server have sent takes to arrive (see
- *  `Link.peerQueueWait`). What the uplink holds is every byte handed to the socket, headers included, drained at the rate
- *  the server takes it (see `Link`). While the room is used up and the uplink holds data, a timer looks again as it
- *  drains. The frames that go at once wait behind what it holds, and a page's download window covers that wait: the
- *  budget notes it on the link as the uplink's model says when each is handed, and as the server's acknowledgements
- *  measure it for data.
- *
- *  The allowance is what keeps data from waiting long in those queues. A PIECES_ACK says when the newest data it covers
- *  arrived, only as the µs after the data the ack before covered, so the clocks of the two ends need not agree: data's
- *  one-way delay is known up to an offset the same for all. Less what the uplink held ahead of it and its own bytes'
- *  time on the link, it is the path's, and its wait is its delay less the least of those. While the wait is under
- *  `WIRE_QUEUE_DELAY_MS` the allowance grows by the bytes each ack covers, less as the wait nears it; past it, the
- *  allowance falls by the excess at the rate the server took. It is at least what the server takes in
- *  `WIRE_QUEUE_DELAY_MS`, within what keeps it acknowledging, and starts there: on a slow uplink, what it would hold more
- *  takes seconds to shed. */
+/** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
 class SendBudget {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender

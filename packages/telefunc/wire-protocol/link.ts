@@ -21,11 +21,7 @@ type SendWait = {
   longestWaitSince(at: number): number
 }
 
-/** One wire, as this side knows it, and every channel on it reads the same: the path's round trip, which an attach's
- *  probe measures; the rate the link carries, as the piece cutter measures it, and the least it carries; and on a page's
- *  WebSocket, the rate the server takes data at, what the uplink holds at that rate, how long the frames that go at
- *  once waited behind it, how long what the server sends waits behind what the page's credit let it send, and when the
- *  page's next acknowledgement or window refresh may go. */
+/** One wire, as this side knows it: every channel on it reads the same round trip and rates. */
 class Link implements SendWait {
   /** The least round trip an attach's probe or a later ping took on this wire, `Infinity` before a probe's answer. */
   pathRtt = Number.POSITIVE_INFINITY

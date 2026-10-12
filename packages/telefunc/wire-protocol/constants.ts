@@ -297,22 +297,9 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             far behind the page is, past which it closes the
 //                             page's broadcast channel.
 //
-// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
-// does: what the receiver has consumed plus its window. The sender's credit is that limit
-// minus what it has sent, so what is still in flight counts against it. Each side advertises
-// its limits again on a reattach to another wire, and the receiver keeps its grown `W` across
-// one (BDP is a property of the path, not of any single wire instance: slight divergence from
-// gRPC's per-connection reset, acceptable for typical transport hiccups). A reattach on the
-// same wire lost nothing and advertises nothing.
+// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //
-// Replay: each end keeps what it sent on a channel until its peer acknowledges it, to replay after a reconnect. A
-// `WINDOW` carries the last seq the receiver has, so each one acknowledges: one goes out as a limit does, once a
-// quarter window of what credit doesn't count, ack requests and their answers, arrived since the last, and at each
-// heartbeat for what arrived since the last, so a quiet channel's replay empties. A receiver never grants a window past
-// half the smaller lane of its peer's replay buffer (`replayWindow`), so what credit lets be in flight, and a message
-// up to as large sent as the credit ran out, always fit it. What credit doesn't hold back, sends nobody awaits past it,
-// ack requests and their answers, takes the rest, and a reconnect that needs what a replay dropped ends the channel on
-// both ends with `NetworkError`.
+// Replay: each end keeps what it sent on a channel until a `WINDOW` acknowledges it, to replay after a reconnect.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */

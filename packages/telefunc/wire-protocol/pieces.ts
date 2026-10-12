@@ -48,20 +48,7 @@ type SendRoom = {
 
 const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
 
-/** One WebSocket's: the whole frames it sends in one turn go in one message, as many bytes as a frame could carry whole
- *  and unannounced, `WIRE_GATHER_BYTES` at most; data starts a message of its own after a frame that goes at once, and
- *  where a room holds data back, after any. A frame it carries (see `carry`) rides on the next message, whatever that
- *  is. A frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. With a rate
- *  measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a frame
- *  over `wholeUpTo` starts with a probe pair, whose acknowledgements measure the rate, and goes at once behind an
- *  ANNOUNCE, as does each frame sent after it in its task, and in the tasks while the probe is out, whole or in pieces as
- *  `announcedNext` allows; as each task ends, an ANNOUNCE of their bytes closes the announcement. So does a smaller
- *  data frame, unless it crosses within its ping deadline: one of `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at
- *  the floor, the rate the link carries at least by what its receiver took by an answer, a heartbeat or an acknowledged
- *  announcement. A smaller control frame, such as the handshake's, goes whole. With a rate measured, a data frame past
- *  its room (see `SendRoom`) goes in pieces as far as that goes, and its rest waits for `sendHeld`: the frames after it
- *  wait too, but those that aren't data and go whole, as a window update does.
- */
+/** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
    *  arrived, when it was sent, the bytes sent through it, and whether it was a probe's. */
@@ -539,17 +526,7 @@ class PieceSender {
   }
 }
 
-/** One WebSocket's: puts a frame sent in pieces back together, whatever their sizes, and acknowledges the bytes it
- *  took. The two pieces after an empty one are acknowledged at once: their sender may measure the rate by them. While
- *  an announcement is open, the next message is waited for at the rate the newest came at, dated apart from the message
- *  before it. A receiver whose peer holds data back by what it acknowledges (`peerHoldsBack`: the server's, see
- *  `SendBudget`) acknowledges each announced message, as its peer's PINGs wait behind them, once more than
- *  `WIRE_PIECES_ACK_BYTES` of frames of any size are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`,
- *  data within `WIRE_SEND_ACK_MS`, and what it took in the message of its side's answer to it (`answering`). Any other
- *  acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one PIECES_ACK per
- *  `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them allows one (`link`, see `Link.acks`), a frame in
- *  the message its side sends next: all a sender needs that cuts its pieces by the rate it measures, and stops
- *  announcing by the rate it carries. */
+/** One WebSocket's receiver: puts a frame sent in pieces back together, and acknowledges the bytes it took. */
 class PieceReceiver {
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
