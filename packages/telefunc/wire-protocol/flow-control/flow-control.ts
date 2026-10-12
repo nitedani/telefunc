@@ -340,19 +340,20 @@ class FlowControl {
     this._widened = true
   }
 
-  // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
-  // nothing waits on.
-
+  /** Sender-side: counts a frame in bytes only, a broadcast's publish, which nothing waits on: it takes no message
+   *  credit. */
   countSentBytes(bytes: number): void {
     const hadCredit = !this.isPastByteCredit
     this._sentBytes += bytes
     if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
+  /** Receiver-side: a frame counted in bytes only arrived, which starts no BDP probe. */
   onArrived(): void {
     this._arrived = true
   }
 
+  /** Receiver-side: such a frame of `bytes` was consumed, which takes no message credit. */
   onConsumedBytes(bytes: number): void {
     this._consume(bytes, 0)
   }
