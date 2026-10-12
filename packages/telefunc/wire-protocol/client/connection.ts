@@ -6,7 +6,6 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { assert, assertUsage } from '../../utils/assert.js'
 import { ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
-import { base64urlToUint8Array } from '../base64url.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
@@ -78,7 +77,7 @@ import type {
 } from '../shared-ws.js'
 import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
-import { SSELineSplitter } from './SSELineSplitter.js'
+import { SSEEvents } from './SSEEvents.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
@@ -2929,8 +2928,7 @@ function createSseEventStreamReader(
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
 } {
-  const lines = new SSELineSplitter()
-  let pendingData = ''
+  const sse = new SSEEvents()
   const ready: Array<Uint8Array<ArrayBuffer>> = []
   let cancelled = false
 
@@ -2942,23 +2940,7 @@ function createSseEventStreamReader(
 
   abortController.signal.addEventListener('abort', cancel, { once: true })
 
-  const flushEvent = () => {
-    if (pendingData !== '') {
-      ready.push(base64urlToUint8Array(pendingData))
-      pendingData = ''
-    }
-  }
-
-  const onLine = (line: string) => {
-    if (line.length === 0) {
-      flushEvent()
-      return
-    }
-    if (line.charCodeAt(0) === 58 /* ':' */) return
-    if (line.startsWith('data: ')) {
-      pendingData = line.slice(6)
-    }
-  }
+  const onEvent = (event: Uint8Array<ArrayBuffer>) => void ready.push(event)
 
   const readNextEntry = async (): Promise<Uint8Array<ArrayBuffer> | null> => {
     while (true) {
@@ -2978,7 +2960,7 @@ function createSseEventStreamReader(
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
       onChunk(value!.byteLength)
-      lines.push(value!, onLine)
+      sse.push(value!, onEvent)
     }
   }
 
