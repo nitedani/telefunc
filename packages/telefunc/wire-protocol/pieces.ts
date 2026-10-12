@@ -45,9 +45,9 @@ type SendRoom = {
 const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
 
 /** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. With
- *  a rate measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a larger
- *  frame starts with a probe pair, whose acknowledgements measure the rate, and goes at once behind an ANNOUNCE, as
- *  does each frame sent after it in its task, and in the tasks while the probe is out, whole or in pieces as
+ *  a rate measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a frame
+ *  over `wholeUpTo` starts with a probe pair, whose acknowledgements measure the rate, and goes at once behind an
+ *  ANNOUNCE, as does each frame sent after it in its task, and in the tasks while the probe is out, whole or in pieces as
  *  `announcedNext` allows; as each task ends, an ANNOUNCE of their bytes closes the announcement. So does a smaller
  *  data frame, unless it crosses within its ping deadline: one of `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at
  *  the floor, the rate the link carries at least by what its receiver took by an answer, a heartbeat or an acknowledged
@@ -89,7 +89,8 @@ class PieceSender {
   private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES
   private pingInterval = 0
   /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
-   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, what a probe carries. */
+   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, what a probe carries, or what the floor carries
+   *  so where no room holds data back, if more. */
   private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
@@ -300,7 +301,11 @@ class PieceSender {
     this.wholeUpTo =
       this.link.fastest > 0
         ? (this.link.fastest * this.pingInterval) / WIRE_PIECE_RATE_MARGIN
-        : 2 * WIRE_PROBE_PAIR_BYTES
+        : Math.max(
+            2 * WIRE_PROBE_PAIR_BYTES,
+            // Only a sender that holds data back needs the rate before a frame the floor carries in time.
+            this.room === UNBOUNDED ? (this.link.floor * this.pingInterval) / WIRE_PIECE_RATE_MARGIN : 0,
+          )
     // What crosses within its ping deadline, twice the interval: on any link a PING crosses, or at the floor.
     this.unannouncedUpTo = Math.min(
       this.wholeUpTo,

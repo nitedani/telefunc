@@ -1183,7 +1183,7 @@ test.each(
   },
 )
 
-test('a push of 4 KiB messages on a fresh wire cuts only its first', async () => {
+test('a push of 4 KiB messages on a fresh wire whose floor carries them within a ping interval goes whole', async () => {
   const { server, page } = loop.open<string, string>()
   let got = 0
   page.listen(() => void got++)
@@ -1191,8 +1191,7 @@ test('a push of 4 KiB messages on a fresh wire cuts only its first', async () =>
   const mark = loop.sent.server.length
   for (let i = 0; i < 2_000; i++) void server.send('x'.repeat(4 * KIB))
   await runUntil(() => got === 2_000, 10_000)
-  // Its empty piece, its probe pair, and its rest.
-  expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE)).toHaveLength(4)
+  expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE || tag === TAG.ANNOUNCE)).toEqual([])
 })
 
 test('a fresh wire carrying only small messages stops announcing them once one announcement was acknowledged, either way', async () => {
