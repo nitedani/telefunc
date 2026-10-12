@@ -8,8 +8,6 @@ export {
   fixedBytes,
   isOneFrame,
   messageFrames,
-  frameBuffer,
-  follows,
   decode,
   decodeClientFrame,
   assertProtocol,
@@ -29,7 +27,6 @@ export {
   seqThrough,
 }
 export type {
-  FrameSpace,
   AckResultStatus,
   ErrorReason,
   ReplayLaneKind,
@@ -130,8 +127,7 @@ const TAG = {
    *  its sender knows the link carries at least, 0 for none. */
   ANNOUNCE: 0x0c as const,
   /** Either way on a WebSocket, where a message may hold several frames (see `messageFrames`): the bytes of the frame
-   *  after it, whose tag doesn't fix them, as its header's seq. Ahead of each such frame but the message's last, and of
-   *  the last where its sender wrote the message in place (see `encode.inPlace`). */
+   *  after it, which isn't its message's last and whose tag doesn't fix them, as its header's seq. */
   LENGTH: 0x0d as const,
 
   // ─── Data plane ───
@@ -446,65 +442,16 @@ function seqThrough(bits: number, sent: number): number {
   return seq > sent && seq >= SEQ_SPAN ? seq - SEQ_SPAN : seq
 }
 
-/** Where a frame is written: the next bytes of a buffer frames are taken from back to back, each with room ahead of it
- *  for a LENGTH (see `frameBuffer`). */
-type FrameSpace = {
-  take(bytes: number): Uint8Array<ArrayBuffer>
-  /** Undoes the last `take`. */
-  takeBack(): void
-}
-
-/** A buffer whose frames each have room ahead of them for a LENGTH: frames taken from it back to back are one message
- *  as they are (see `encode.inPlace`). */
-function frameBuffer(bytes: number): Uint8Array<ArrayBuffer> {
-  const buffer = new Uint8Array(bytes)
-  FRAME_BUFFERS.add(buffer.buffer)
-  return buffer
-}
-const FRAME_BUFFERS = new WeakSet<ArrayBufferLike>()
-
-/** Whether `frame` was taken from a buffer of `frameBuffer` right after `before`, or with none, from one at all. */
-function follows(frame: Uint8Array, before: Uint8Array | undefined): boolean {
-  return before === undefined
-    ? FRAME_BUFFERS.has(frame.buffer)
-    : frame.buffer === before.buffer && frame.byteOffset === before.byteOffset + before.byteLength + LENGTH_BYTES
-}
-
-/** A frame of `tag` whose payload is `prefix` bytes its caller writes, then `text`; in `space` if given. */
-function encodeTextFrame(
-  tag: number,
-  index: number,
-  text: string,
-  seq: number,
-  space?: FrameSpace,
-  prefix = 0,
-): Uint8Array<ArrayBuffer> {
-  if (space !== undefined) {
-    // As many bytes as UTF-16 units where the text is ASCII, as most is; else the bytes it encodes to.
-    const frame = space.take(HEADER + prefix + text.length)
-    if (textEncoder.encodeInto(text, frame.subarray(HEADER + prefix)).read === text.length) {
-      writeHeader(frame, tag, index, seq)
-      return frame
-    }
-    space.takeBack()
-  }
+function encodeTextFrame(tag: number, index: number, text: string, seq: number): Uint8Array<ArrayBuffer> {
   const payload = textEncoder.encode(text)
-  const bytes = HEADER + prefix + payload.byteLength
-  const frame = space === undefined ? new Uint8Array(bytes) : space.take(bytes)
+  const frame = new Uint8Array(HEADER + payload.byteLength)
   writeHeader(frame, tag, index, seq)
-  frame.set(payload, HEADER + prefix)
+  frame.set(payload, HEADER)
   return frame
 }
 
-function encodeBinaryFrame(
-  tag: number,
-  index: number,
-  data: Uint8Array,
-  seq: number,
-  space?: FrameSpace,
-): Uint8Array<ArrayBuffer> {
-  const bytes = HEADER + data.byteLength
-  const frame = space === undefined ? new Uint8Array(bytes) : space.take(bytes)
+function encodeBinaryFrame(tag: number, index: number, data: Uint8Array, seq: number): Uint8Array<ArrayBuffer> {
+  const frame = new Uint8Array(HEADER + data.byteLength)
   writeHeader(frame, tag, index, seq)
   frame.set(data, HEADER)
   return frame
@@ -525,23 +472,16 @@ function encodeJsonFrame(tag: number, payload: unknown): Uint8Array<ArrayBuffer>
 }
 
 const encode = {
-  text: (index: number, text: string, seq = 0, space?: FrameSpace) =>
-    encodeTextFrame(TAG.TEXT, index, text, seq, space),
-  publish: (index: number, text: string, seq = 0, space?: FrameSpace) =>
-    encodeTextFrame(TAG.PUBLISH, index, text, seq, space),
-  publishAckReq: (index: number, text: string, seq = 0, space?: FrameSpace) =>
-    encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq, space),
-  textAckReq: (index: number, text: string, seq = 0, space?: FrameSpace) =>
-    encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq, space),
+  text: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.TEXT, index, text, seq),
+  publish: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
+  publishAckReq: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
+  textAckReq: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
 
-  binary: (index: number, data: Uint8Array, seq = 0, space?: FrameSpace) =>
-    encodeBinaryFrame(TAG.BINARY, index, data, seq, space),
-  publishBinary: (index: number, data: Uint8Array, seq = 0, space?: FrameSpace) =>
-    encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq, space),
-  publishBinaryAckReq: (index: number, data: Uint8Array, seq = 0, space?: FrameSpace) =>
-    encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq, space),
-  binaryAckReq: (index: number, data: Uint8Array, seq = 0, space?: FrameSpace) =>
-    encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq, space),
+  binary: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
+  publishBinary: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
+  publishBinaryAckReq: (index: number, data: Uint8Array, seq = 0) =>
+    encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
+  binaryAckReq: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq),
 
   /** Wire: [header][u64 ackedSeq][u8 status][result bytes...]
    *  `ownSeq` — this frame's own replay sequence number.
@@ -552,11 +492,13 @@ const encode = {
     ackedSeq: number,
     result: string,
     status: AckResultStatus = ACK_STATUS.OK,
-    space?: FrameSpace,
   ): Uint8Array<ArrayBuffer> {
-    const frame = encodeTextFrame(TAG.ACK_RES, index, result, ownSeq, space, ACK_RES_PREFIX)
+    const payload = textEncoder.encode(result)
+    const frame = new Uint8Array(HEADER + ACK_RES_PREFIX + payload.byteLength)
+    writeHeader(frame, TAG.ACK_RES, index, ownSeq)
     writeU64(frame, HEADER, ackedSeq)
     frame[HEADER + 8] = status
+    frame.set(payload, HEADER + ACK_RES_PREFIX)
     return frame
   },
 
@@ -613,17 +555,6 @@ const encode = {
     writeHeader(frame, TAG.ANNOUNCE, 0, floorPerS)
     writeU32(frame, HEADER, bytes)
     return frame
-  },
-  /** `frames`, each of which `follows` the one before, as one message where they are, with a LENGTH ahead of each, the
-   *  last's too. */
-  inPlace(frames: readonly Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
-    const first = frames[0]!
-    const last = frames[frames.length - 1]!
-    const start = first.byteOffset - LENGTH_BYTES
-    const message = new Uint8Array(first.buffer, start, last.byteOffset + last.byteLength - start)
-    for (const frame of frames)
-      writeHeader(message.subarray(frame.byteOffset - LENGTH_BYTES - start), TAG.LENGTH, 0, frame.byteLength)
-    return message
   },
   /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message,
    *  written in `message` if given. */
@@ -761,8 +692,8 @@ function isOneFrame(message: Uint8Array): boolean {
   return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
 }
 
-/** The frames a WebSocket message of several holds, in order. Each is as long as its tag fixes, or the LENGTH ahead of
- *  it says, and is whole; the last, with no LENGTH ahead, is the rest. */
+/** The frames a WebSocket message of several holds, in order. Each but the last is as long as its tag fixes, or the
+ *  LENGTH ahead of it says, and is whole; the last is the rest. */
 function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
   const frames: Uint8Array<ArrayBuffer>[] = []
   const end = message.byteLength
@@ -773,7 +704,7 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
       assertProtocol(end - at > HEADER, 'LENGTH last in its message')
       bytes = readU32(message, at + 3)
       at += HEADER
-      assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at >= bytes, 'LENGTH of no frame')
+      assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
     } else if (bytes === 0 || end - at <= bytes) {
       frames.push(message.subarray(at))
       return frames
@@ -785,7 +716,6 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
     )
     frames.push(message.subarray(at, at + bytes))
     at += bytes
-    if (at === end) return frames
   }
 }
 

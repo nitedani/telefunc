@@ -27,9 +27,11 @@ import {
 import {
   TAG,
   ProtocolViolationError,
+  LENGTH_BYTES,
   assertProtocol,
   decodeClientFrame,
   encode,
+  fixedBytes,
   isOneFrame,
   messageFrames,
   isConnCtrlTag,
@@ -421,11 +423,9 @@ class ChannelMux {
       this.terminateWire(connection)
       return Promise.resolve(null)
     }
-    // Each is handled as it would be alone, those before the last riding on it.
+    // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
+    // measures.
     const { receiver } = entry.state.pieces
-    let lengths = rawFrame.byteLength
-    for (const frame of frames) lengths -= frame.byteLength
-    receiver.tookLength(lengths)
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     const last = frames.length - 1
     for (let i = 0; i <= last; i++) {
@@ -433,6 +433,7 @@ class ChannelMux {
       const frame = frames[i]!
       const dispatched = this.dispatchFrame(entry, connection, frame, i < last ? 'riding' : 'alone')
       if (frame[0] === TAG.RECONCILE) outcome = dispatched
+      if (i < last && fixedBytes(frame[0]!) === 0) receiver.tookLength(LENGTH_BYTES)
     }
     return outcome
   }
