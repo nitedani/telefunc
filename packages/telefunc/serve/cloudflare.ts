@@ -3,7 +3,7 @@
 export { Telefunc }
 export type { CloudflareOptions }
 
-import { DurableObject } from 'cloudflare:workers'
+import { DurableObject, env } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { getServerConfig, enableChannelTransports, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
@@ -84,14 +84,13 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   /** When each session token this isolate's Durable Objects serve is due to be pinned in KV, in the order they were
    *  pinned. */
   const pinDueAt = new Map<string, number>()
-  let sessionKV: KVNamespace | undefined
 
   /** The Worker routes a token by its KV pin. The session Durable Object writes the pin, once and again before it
    *  lapses: a Worker, whose KV reads are cached, would see no pin and write it on each request of the page's first
    *  minute. */
   function pinSession(request: Request): void {
     const token = request.headers.get(TELEFUNC_SESSION_HEADER)
-    const kv = sessionKV
+    const kv = getKVBinding(env)
     if (!token || !kv) return
     const now = Date.now()
     const due = pinDueAt.get(token)
@@ -155,7 +154,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       broadcast.attachBinding(binding, bindingName)
       const kv = getKVBinding(env)
       if (kv) broadcast.attachKV(kv)
-      sessionKV = kv
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }

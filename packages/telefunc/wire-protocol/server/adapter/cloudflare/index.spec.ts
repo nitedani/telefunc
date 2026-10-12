@@ -32,6 +32,8 @@ const mocks = vi.hoisted(() => {
   }
 
   return {
+    /** The Worker's bindings, as `cloudflare:workers` exports them. */
+    env: {} as Record<string, unknown>,
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
     enableChannelTransports: vi.fn(),
@@ -52,6 +54,7 @@ const mocks = vi.hoisted(() => {
 })
 
 vi.mock('cloudflare:workers', () => ({
+  env: mocks.env,
   DurableObject: class {
     protected readonly ctx: DurableObjectState
     protected readonly env: Cloudflare.Env
@@ -148,6 +151,7 @@ function createBinding() {
 }
 
 beforeEach(() => {
+  delete mocks.env.TelefuncKV
   mocks.crosswsFactory.mockClear()
   mocks.crosswsAdapter.handleDurableInit.mockReset()
   mocks.crosswsAdapter.handleDurableUpgrade.mockReset()
@@ -202,6 +206,7 @@ describe('cloudflare adapter entrypoint', () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put')
     const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
+    mocks.env.TelefuncKV = kv
 
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
@@ -404,6 +409,7 @@ describe("the session Durable Object's pin", () => {
     const { binding } = createBinding()
     const tf = new Telefunc()
     const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
+    mocks.env.TelefuncKV = kv
     const instance = new tf.TelefuncDurableObject({} as DurableObjectState, env) as unknown as {
       fetch(request: Request): Promise<Response>
     }
