@@ -183,18 +183,7 @@ class BdpEstimator {
     const atPathRtt = loopRtt < rtt ? loopRtt / rtt : 1
     const byteSample = received * atPathRtt
     const msgSample = this._msgsReceived - this._msgsAtPingSent
-    const bytes: AxisDecision =
-      this._byteWindow >= this._byteWindowMax
-        ? 'at-cap'
-        : byteSample * 3 < this._byteWindow * 2
-          ? 'sample-too-small'
-          : measured
-            ? 'grow'
-            : this._pingFollowsGrowth
-              ? 'window-grew'
-              : starved
-                ? 'grow'
-                : 'wire-busy'
+    const bytes = this._byteDecision(byteSample, measured, starved)
     const msgWindow = (starved && this._msgWindowBeforeGrowth) || this._msgWindow
     this._msgWindowBeforeGrowth = 0
     const msgs: AxisDecision =
@@ -211,6 +200,16 @@ class BdpEstimator {
       this._probeIntervalMs = Math.min(BDP_PING_MAX_INTERVAL_MS, this._probeIntervalMs * 2)
     }
     return { acknowledged: true, bytes, msgs }
+  }
+
+  /** The byte axis's verdict on a sample of `byteSample` bytes: taken at the path's round trip if `measured`, and in a
+   *  round the window held the sender back if `starved`. */
+  private _byteDecision(byteSample: number, measured: boolean, starved: boolean): AxisDecision {
+    if (this._byteWindow >= this._byteWindowMax) return 'at-cap'
+    if (byteSample * 3 < this._byteWindow * 2) return 'sample-too-small'
+    if (measured) return 'grow'
+    if (this._pingFollowsGrowth) return 'window-grew'
+    return starved ? 'grow' : 'wire-busy'
   }
 
   /** Commit a byte-window growth: a doubling, or less as the last settled probe says. Idempotent at the cap. */
