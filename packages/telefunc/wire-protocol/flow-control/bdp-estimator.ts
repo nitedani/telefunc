@@ -161,7 +161,7 @@ class BdpEstimator {
     // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later ping
     // that took less shows the path takes no more.
     const link = this._link
-    if (link !== null && link.pathRtt < Infinity && rtt < link.pathRtt) link.pathRtt = rtt
+    if (link !== null && link.pathRtt < Infinity) link.measured(rtt)
     const roundWait = sendWait?.longestWaitSince(this._pingSentAt) ?? 0
     const roundRtt = Math.max(1, rtt - this._pingWait)
     if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
