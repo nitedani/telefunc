@@ -22,64 +22,12 @@ import { TAG, encode, isOneFrame, messageFrames } from './shared-ws.js'
 import { SendBudget } from './client/send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
+import { Pipe } from './test/loopback.js'
 
 const LATENCY_MS = 5
 
 /** What a socket read hands over at once; the receiver's microtasks run between two reads. */
 const READ_BYTES = 64 * 1024
-
-/** One direction of a wire: a frame leaves once the one before it has, and arrives `latencyMs` after it left. */
-class Pipe {
-  private queue: { frame: Uint8Array<ArrayBuffer>; at: number }[] = []
-  private timer: ReturnType<typeof setTimeout> | null = null
-  private held = false
-  /** What the pipe carries, in bytes: the sender's `bufferedAmount`. */
-  bytes = 0
-  /** A slow link carries a frame only once the one before it has gone through. */
-  bytesPerMs = Infinity
-  latencyMs = LATENCY_MS
-  private lastAt = 0
-  constructor(private readonly deliver: (frame: Uint8Array<ArrayBuffer>) => void) {}
-  push(frame: Uint8Array<ArrayBuffer>): void {
-    this.lastAt = Math.max(Date.now(), this.lastAt) + frame.byteLength / this.bytesPerMs
-    this.queue.push({ frame, at: this.lastAt + this.latencyMs })
-    this.bytes += frame.byteLength
-    this.schedule()
-  }
-  /** What the network still carries stops arriving, until `release`. */
-  hold(): void {
-    this.held = true
-  }
-  release(): void {
-    this.held = false
-    this.schedule()
-  }
-  /** The wire is cut: what it still carries is lost. */
-  clear(): void {
-    this.queue.length = 0
-    this.bytes = 0
-  }
-  get length(): number {
-    return this.queue.length
-  }
-  private schedule(): void {
-    if (this.timer || this.held || this.queue.length === 0) return
-    this.timer = setTimeout(
-      () => {
-        this.timer = null
-        let read = 0
-        while (!this.held && read < READ_BYTES && this.queue.length > 0 && this.queue[0]!.at <= Date.now()) {
-          const { frame } = this.queue.shift()!
-          read += frame.byteLength
-          this.bytes -= frame.byteLength
-          this.deliver(frame)
-        }
-        this.schedule()
-      },
-      Math.max(0, this.queue[0]!.at - Date.now()),
-    )
-  }
-}
 
 let loop: Loopback
 
@@ -92,8 +40,8 @@ class LoopbackSocket {
   onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
   onclose: (() => void) | null = null
   onerror: (() => void) | null = null
-  readonly toServer = new Pipe((frame) => loop.receive(this, frame))
-  readonly toPage = new Pipe((frame) => this.onmessage?.({ data: frame.buffer }))
+  readonly toServer = new Pipe(LATENCY_MS, READ_BYTES)
+  readonly toPage = new Pipe(LATENCY_MS, READ_BYTES)
   constructor(_url: string) {
     this.toServer.bytesPerMs = this.toPage.bytesPerMs = loop.linkBytesPerMs
     loop.sockets.push(this)
@@ -109,7 +57,13 @@ class LoopbackSocket {
   }
   send(frame: Uint8Array<ArrayBuffer>): void {
     loop.sends('page', frame)
-    this.toServer.push(frame.slice())
+    const sent = frame.slice()
+    this.toServer.push(sent.byteLength, () => loop.receive(this, sent))
+  }
+  /** The server sends `frame` to the page. */
+  sendToPage(frame: Uint8Array<ArrayBuffer>): void {
+    const sent = frame.slice()
+    this.toPage.push(sent.byteLength, () => this.onmessage?.({ data: sent.buffer }))
   }
   close(): void {
     this.cut()
@@ -139,7 +93,7 @@ class Loopback {
     wholeMessages: true,
     sendNow: (socket, frame) => {
       this.sends('server', frame)
-      socket.toPage.push(frame.slice())
+      socket.sendToPage(frame)
     },
     bufferedAmount: (socket) => socket.toPage.bytes,
     terminateConnection: (socket) => socket.cut(),
