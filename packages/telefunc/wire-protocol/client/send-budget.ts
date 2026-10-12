@@ -8,8 +8,8 @@ import {
   WIRE_SEND_ACK_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
-import type { Link } from '../link.js'
 import { PieceSender } from '../pieces.js'
+import type { Uplink } from './uplink.js'
 import { isSequencedTag } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
@@ -46,11 +46,12 @@ class SendBudget {
   constructor(
     transmit: (message: Uint8Array<ArrayBuffer>) => void,
     queued: () => number,
-    private readonly link: Link,
+    private readonly uplink: Uplink,
   ) {
-    this.sender = new PieceSender(transmit, queued, link, {
+    this.sender = new PieceSender(transmit, queued, uplink.link, {
       dataRoom: () => this.roomPast(this.sender.transmittedBytes),
       handed: (bytes, data) => this.handed(bytes, data),
+      handedControl: (tag, bytes) => uplink.handedControl(tag, bytes),
     })
   }
 
@@ -61,9 +62,9 @@ class SendBudget {
       return this.pace()
     }
     // What it waits behind: the uplink holds it too once handed.
-    const wait = this.link.waitNow()
+    const wait = this.uplink.waitNow()
     this.sender.send(frame, pingInterval)
-    this.link.noteWait(wait)
+    this.uplink.noteWait(wait)
   }
 
   private get allowance(): number {
@@ -100,10 +101,10 @@ class SendBudget {
     if (back < this.leastBack) this.leastBack = back
     this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
     this.lateAt = now
-    this.link.arrived(newly, spanMs)
+    this.uplink.arrived(newly, spanMs)
     let newest: { end: number; bytes: number; ahead: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
-    this.link.acknowledged(this.sender.transmittedBytes - acknowledged)
+    this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
     if (newest !== undefined) this.measure(newest, newly, spanUs)
     this.sendHeld()
     this.pace()
@@ -113,20 +114,20 @@ class SendBudget {
   /** The room less what the sender handed past `sent` bytes. */
   private roomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
-    const waiting = Math.min(unacknowledged, this.link.inUplink() + sent - this.sender.transmittedBytes)
+    const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
     // Up to `slack` arrived unacknowledged. More arrives while an acknowledgement comes back, or would wait behind what
     // the server sends now.
-    const late = Math.max(this.lateMs, this.link.peerQueueWait())
-    const unarrived = unacknowledged - this.link.uplinkRate() * late - this.slack
+    const late = Math.max(this.lateMs, this.uplink.peerQueueWait())
+    const unarrived = unacknowledged - this.uplink.uplinkRate() * late - this.slack
     return this.allowance - Math.max(waiting, unarrived)
   }
 
   /** While the room is used up and the uplink holds data, the uplink sets the pace, and data may wait for room: looks
    *  again once the uplink carried what its server acknowledges at once, or all it holds. */
   private pace(): void {
-    const { drainRate } = this.link
+    const { drainRate } = this.uplink
     if (drainRate === 0 || this.room > 0 || this.paceTimer !== null) return
-    const queued = this.link.inUplink()
+    const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
     this.paceDue = performance.now() + ms
@@ -142,7 +143,7 @@ class SendBudget {
   /** Notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data handed within a
    *  ms of one another make one sample, dated by the first. */
   private handed(bytes: number, data: boolean): void {
-    const ahead = this.link.handed(bytes)
+    const ahead = this.uplink.handed(bytes)
     if (!data) return
     const end = this.sender.transmittedBytes
     const at = performance.now()
@@ -161,7 +162,7 @@ class SendBudget {
     spanUs: number,
   ): void {
     const delay = this.arrivedAt - newest.at
-    const { drainRate } = this.link
+    const { drainRate } = this.uplink
     const path = drainRate > 0 ? delay - (newest.ahead + newest.bytes) / drainRate : delay
     // A path that stays over the target with the least allowance rose.
     const least = this.least
@@ -169,7 +170,7 @@ class SendBudget {
     const atLeast = allowance === least
     if (path < this.leastDelay || (atLeast && path - this.leastDelay >= WIRE_QUEUE_DELAY_MS)) this.leastDelay = path
     const wait = delay - this.leastDelay
-    this.link.noteWait(Math.max(0, wait))
+    this.uplink.noteWait(Math.max(0, wait))
     if (wait < WIRE_QUEUE_DELAY_MS) {
       allowance += (newly * (WIRE_QUEUE_DELAY_MS - wait)) / WIRE_QUEUE_DELAY_MS
     } else if (spanUs > 0) {
@@ -182,7 +183,7 @@ class SendBudget {
   /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges,
    *  and `WIRE_SEND_AHEAD_MIN_BYTES` at most or before its rate is measured. */
   private get least(): number {
-    const { drainRate } = this.link
+    const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_SEND_AHEAD_MIN_BYTES
     return Math.min(WIRE_SEND_AHEAD_MIN_BYTES, Math.max(this.slack + 1024, drainRate * WIRE_QUEUE_DELAY_MS))
   }
@@ -190,7 +191,7 @@ class SendBudget {
   /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most, and where less,
    *  `WIRE_SEND_ACK_MIN_BYTES` and what the uplink carries in `WIRE_SEND_ACK_MS` after them. */
   private get slack(): number {
-    const { drainRate } = this.link
+    const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_PIECES_ACK_BYTES
     return Math.min(WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_MIN_BYTES + drainRate * WIRE_SEND_ACK_MS)
   }

@@ -1238,8 +1238,8 @@ test("a fresh wire's attach measures the path's round trip by the RECONCILED, wi
   await runUntil(() => opened, 1_000)
   expect(loop.sent.server.filter(([tag]) => tag === TAG.BDP_PING_ACK)).toEqual([])
   expect(
-    (page as unknown as { _connection: { transport: { link: { pathRtt: number } } } })._connection.transport.link
-      .pathRtt,
+    (page as unknown as { _connection: { transport: { uplink: { link: { pathRtt: number } } } } })._connection.transport
+      .uplink.link.pathRtt,
   ).toBe(2 * LATENCY_MS)
 })
 

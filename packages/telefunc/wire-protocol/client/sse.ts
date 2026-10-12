@@ -17,7 +17,7 @@ import {
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
-import { Link } from '../link.js'
+import { Uplink } from './uplink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../shared-ws.js'
 import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
@@ -54,7 +54,7 @@ class SseTransport implements UpgradeSource {
   readonly reconcileMode = 'batch-on-reconcile' as const
   /** Each wire's own, so a POST still in flight for a wire that died isn't dispatched on the next one. */
   private connId = randomUuid()
-  link = new Link()
+  uplink = new Uplink()
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
   }
@@ -209,7 +209,7 @@ class SseTransport implements UpgradeSource {
 
   private async openStream(): Promise<void> {
     this.connId = randomUuid()
-    this.link = new Link()
+    this.uplink = new Uplink()
     const abortController = new AbortController()
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()

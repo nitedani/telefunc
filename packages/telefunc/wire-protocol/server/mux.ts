@@ -52,7 +52,7 @@ import type {
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PieceReceiver, PieceSender } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
-import { SocketWait } from '../link.js'
+import { SocketWait } from './socket-wait.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by

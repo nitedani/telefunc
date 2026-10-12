@@ -17,6 +17,7 @@ import {
   WIRE_SEND_ACK_MS,
 } from './constants.js'
 import { Link } from './link.js'
+import type { Uplink } from './client/uplink.js'
 import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag } from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
@@ -44,9 +45,11 @@ type SendRoom = {
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not. */
   handed(bytes: number, data: boolean): void
+  /** It handed the socket a PIECES_ACK, or a window refresh, of `tag` and `bytes`. */
+  handedControl(tag: number, bytes: number): void
 }
 
-const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
+const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, handedControl: () => {} }
 
 /** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
@@ -142,12 +145,10 @@ class PieceSender {
       this.setWholeUpTo()
     }
     const tag = frame[0]!
-    if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.link.refreshes.handed(frame.byteLength)
-    if (tag === TAG.PIECES_ACK) {
-      this.link.acks.handed(frame.byteLength)
-      // It passes what waits: the probe its peer waits on may be its own.
-      if (this.open === null) return this.pass(frame)
-    }
+    if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW || tag === TAG.PIECES_ACK)
+      this.room.handedControl(tag, frame.byteLength)
+    // It passes what waits: the probe its peer waits on may be its own.
+    if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
       if (this.open === null && !this.announces(frame)) return this.pass(frame)
       return this.sendBehindAnnouncement(frame)
@@ -506,7 +507,7 @@ class PieceSender {
     for (const take of this.carried.splice(0)) {
       const frame = take()
       if (frame === null) continue
-      ;(frame[0] === TAG.PIECES_ACK ? this.link.acks : this.link.refreshes).handed(frame.byteLength)
+      this.room.handedControl(frame[0]!, frame.byteLength)
       this.count(frame, false)
       this.add(frame)
     }
@@ -561,11 +562,11 @@ class PieceReceiver {
 
   constructor(
     private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
-    /** `link`: the page's wire, whose share for acknowledgements they wait for. `carry`: its side's
+    /** `uplink`: the page's, whose share for acknowledgements they wait for. `carry`: its side's
      *  `PieceSender.carry`. */
     private readonly options: {
       peerHoldsBack: boolean
-      link?: Link
+      uplink?: Uplink
       carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
     },
   ) {}
@@ -690,7 +691,7 @@ class PieceReceiver {
   private acknowledgeSoon(withNext = false): void {
     const wait = Math.max(
       this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt,
-      this.options.link?.acks.wait() ?? 0,
+      this.options.uplink?.acks.wait() ?? 0,
     )
     if (wait > 0) this.acknowledgeIn(wait, withNext)
     else if (withNext) this.acknowledgeWithNext()

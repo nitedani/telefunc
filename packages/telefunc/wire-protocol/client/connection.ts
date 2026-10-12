@@ -35,7 +35,7 @@ import {
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
-import { Link, type SendWait } from '../link.js'
+import type { SendWait } from '../link.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
@@ -64,6 +64,7 @@ import { randomUuid } from '../../utils/randomUuid.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { settledOrAborted } from '../../utils/settledOrAborted.js'
 import { Heartbeat } from './heartbeat.js'
+import type { Uplink } from './uplink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
 
@@ -85,14 +86,14 @@ type ProbeWire = {
   send: (frame: Uint8Array<ArrayBuffer>) => void
   onFrame: (cb: (frame: DecodedFrame, byteLength: number) => void) => void
   close: () => void
-  /** The wire it opens. */
-  link: Link
+  /** The uplink of the wire it opens. */
+  uplink: Uplink
 }
 
 type ProbeSession = {
   upgradeId: string
   probeHeartbeat: Heartbeat
-  link: Link
+  uplink: Uplink
 }
 
 /** The verdict IS the recovery decision, so the two cases must stay distinct: `emitted` may have
@@ -121,8 +122,8 @@ interface MuxChannel {
   readonly isClosed: boolean
   /** The largest frame its server takes. */
   readonly _maxFrameBytes: number
-  /** `link` is the wire it opened on: the one of the channel's last attach means that same wire, which lost nothing. */
-  _onTransportOpen(batched: boolean, link: Link): void
+  /** It opened on `uplink`'s wire: the one of the channel's last attach means that same wire, which lost nothing. */
+  _onTransportOpen(batched: boolean, uplink: Uplink): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
   _onTransportBatched(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
@@ -131,9 +132,9 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
-  /** What this channel declares in its RECONCILE entry on every (re)attach, on `link`, whose flow-control frames wait
-   *  for a batched POST when `batched`. */
-  _reattachState(link: Link, batched: boolean): ReattachState
+  /** What this channel declares in its RECONCILE entry on every (re)attach, on `uplink`'s wire, whose flow-control
+   *  frames wait for a batched POST when `batched`. */
+  _reattachState(uplink: Uplink, batched: boolean): ReattachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
   _onProbeAnswered(probe: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
@@ -222,8 +223,8 @@ type ClientChannelTransport = {
   /** True iff client→server frames are per-POST batched instead of pushed onto
    *  one streaming body — signals the channel to use a larger initial window. */
   readonly batched: boolean
-  /** The wire it carries, or opens next. */
-  readonly link: Link
+  /** The uplink of the wire it carries, or opens next. */
+  readonly uplink: Uplink
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
@@ -1173,7 +1174,8 @@ class ClientConnection implements MuxConnection {
     this.installHeartbeat(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
-    for (const channel of outcome.channelsToOpen) channel._onTransportOpen(this.transport.batched, this.transport.link)
+    for (const channel of outcome.channelsToOpen)
+      channel._onTransportOpen(this.transport.batched, this.transport.uplink)
     this.tryCompleteUpgrade()
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
@@ -1270,7 +1272,7 @@ class ClientConnection implements MuxConnection {
       return null
     }
     this.enterUpgradeReady(attempt)
-    return { upgradeId, probeHeartbeat, link: probe.link }
+    return { upgradeId, probeHeartbeat, uplink: probe.uplink }
   }
 
   /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
@@ -1308,7 +1310,7 @@ class ClientConnection implements MuxConnection {
     if (attempt.signal.aborted) return
     this.enterUpgradeCommitting(from, to, session, attempt)
     const emission = await from.emitBarrier(
-      () => this.buildBarrierFrame(sessionId, session.upgradeId, session.link),
+      () => this.buildBarrierFrame(sessionId, session.upgradeId, session.uplink),
       attempt.signal,
     )
 
@@ -1459,7 +1461,7 @@ class ClientConnection implements MuxConnection {
   buildReconcileFrame(): OutboundFrame {
     const open = this.declareOpenEntries({
       skipUnnamed: false,
-      link: this.transport.link,
+      uplink: this.transport.uplink,
       batched: this.transport.batched,
     })
     const reconcile: ReconcilePayload = {
@@ -1471,19 +1473,19 @@ class ClientConnection implements MuxConnection {
 
   /** The old wire's last frame. A channel the server awaits is listed, and its await moves to the new wire. One no
    *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
-  private buildBarrierFrame(sessionId: string, upgradeId: string, link: Link): OutboundFrame {
-    // Its entries attach on the WebSocket, `link`, the wire after this one.
-    const open = this.declareOpenEntries({ skipUnnamed: true, link, batched: false })
+  private buildBarrierFrame(sessionId: string, upgradeId: string, uplink: Uplink): OutboundFrame {
+    // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
+    const open = this.declareOpenEntries({ skipUnnamed: true, uplink, batched: false })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
   private declareOpenEntries({
     skipUnnamed,
-    link,
+    uplink,
     batched,
   }: {
     skipUnnamed: boolean
-    link: Link
+    uplink: Uplink
     batched: boolean
   }): ReconcileOpenEntry[] {
     this.enterReconciling()
@@ -1505,7 +1507,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState(link, batched)
+      const state = entry.channel._reattachState(uplink, batched)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
@@ -1667,7 +1669,7 @@ class ClientConnection implements MuxConnection {
       for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
       if (opened && entry.state.tag === 'open')
-        entry.channel._onTransportOpen(this.transport.batched, this.transport.link)
+        entry.channel._onTransportOpen(this.transport.batched, this.transport.uplink)
     }
     this.startTtlIfIdle()
     this.maybeStartUpgrade()
