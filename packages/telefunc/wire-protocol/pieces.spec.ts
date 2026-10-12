@@ -1,4 +1,5 @@
 import { afterEach, expect, test, vi } from 'vitest'
+import { Link } from './link.js'
 import { PieceReceiver, PieceSender } from './pieces.js'
 import { decode, encode, TAG } from './shared-ws.js'
 
@@ -131,6 +132,32 @@ test('an acknowledgement within one tick of a coarsened clock measures a probe a
   transmitted.length = 0
   sender.send(data(2_000_000), 5_000)
   expect(transmitted.length).toBeGreaterThan(1)
+})
+
+test('a rate counts what the socket holds ahead of a frame but the largest message, which a frame sent in pieces is not', async () => {
+  const clock = { now: 0 }
+  vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
+  let queued = 0
+  const link = new Link()
+  // 32 B per ms: a frame of 20 000 B goes whole in 5 s / 8.
+  link.rise(32, 0)
+  const sender = new PieceSender(
+    () => {},
+    () => queued,
+    link,
+  )
+  sender.send(data(80_000), 5_000)
+  clock.now = 10_000
+  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  // The rate lapsed; the socket holds 40 000 B as a whole frame goes.
+  clock.now = 70_000
+  queued = 40_000
+  sender.send(data(20_000), 5_000)
+  await flush()
+  clock.now = 71_000
+  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  // In 1 s, the 40 000 B less the largest message, a piece of 20 000 B, and the frame.
+  expect(link.fastest).toBe((40_000 - (PIECE + 20_000) + 20_000) / 1_000)
 })
 
 test('an acknowledgement counts the bytes handed to the socket, announcements and piece headers included, and refuses more, or nothing new', () => {

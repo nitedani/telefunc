@@ -188,7 +188,6 @@ class PieceSender {
   /** Hands the socket `frame`, whole or in pieces. */
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
-    if (bytes > this.largest) this.largest = bytes
     if (bytes > this.wholeUpTo || (this.link.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.room.dataRoom()))
       return this.cut(frame, 0)
     this.gather(frame, isSequencedTag(frame[0]!))
@@ -241,7 +240,6 @@ class PieceSender {
 
   /** Hands the socket `message`, the frames carried riding ahead of it (see `handGathered`). */
   private hand(message: Uint8Array<ArrayBuffer>): void {
-    if (this.gathered.length === 0) return this.transmit(message)
     // Only what was carried rides, of bytes its tag fixes: a LENGTH ahead of it would count after `message`.
     assert(!this.lastVaries)
     this.gathered.push(message)
@@ -333,7 +331,6 @@ class PieceSender {
       queueMicrotask(this.closeAnnouncement)
     }
     this.open.bytes += bytes
-    if (bytes > this.largest) this.largest = bytes
     if (this.link.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
     else this.sendAnnounced(frame, 0, now)
   }
