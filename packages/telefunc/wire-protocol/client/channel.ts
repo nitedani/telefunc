@@ -275,7 +275,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _onProbeAnswered(probe: number): void {
-    this._flow.onPingAck(probe, Infinity, Infinity, () => 0)
+    this._flow.onProbeAnswered(probe)
   }
 
   /** @internal */

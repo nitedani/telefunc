@@ -236,6 +236,11 @@ class FlowControl {
     return this._bdp.probeAttach(link)
   }
 
+  /** Receiver-side: the RECONCILED answered the probe of an attach's RECONCILE entry (see `probeAttach`). */
+  onProbeAnswered(probe: number): void {
+    this._bdp.settleAttachProbe(probe)
+  }
+
   /** Receiver-side: account post-callback consumption of one frame. Emits
    *  refresh `WINDOW` / `MSG_WINDOW` frames once a quarter of the estimator's
    *  byte window, or of the message window, has been consumed since that limit last went out, and the wire's share of

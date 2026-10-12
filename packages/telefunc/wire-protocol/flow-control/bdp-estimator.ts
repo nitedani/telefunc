@@ -188,6 +188,15 @@ class BdpEstimator {
     return this._probes
   }
 
+  /** Settles `probe` if it is an attach's, whose answer measures its wire's round trip. Returns whether it was. */
+  settleAttachProbe(probe: number): boolean {
+    const attach = this._attachProbes.find((pending) => pending.probe === probe)
+    if (!attach) return false
+    this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
+    attach.link.measured(performance.now() - attach.sentAt)
+    return true
+  }
+
   /** It attached on `link`. */
   attach(link: Link): void {
     this._link = link
@@ -206,12 +215,7 @@ class BdpEstimator {
     deliveredBefore: (ms: number) => number,
     sendWait: SendWait | null = null,
   ): GrowDecision {
-    const attach = this._attachProbes.find((pending) => pending.probe === probe)
-    if (attach) {
-      this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
-      attach.link.measured(performance.now() - attach.sentAt)
-      return NOT_SETTLED
-    }
+    if (this.settleAttachProbe(probe)) return NOT_SETTLED
     if (!this._pingInFlight || probe !== this._ping) return NOT_SETTLED
     this._pingInFlight = false
     const now = performance.now()
