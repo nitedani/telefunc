@@ -121,20 +121,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     )
   }
 
-  const channelHooks = getTelefuncChannelHooks()
-  const crosswsAdapter = crossws({
-    bindingName,
-    instanceName: baseInstanceName,
-    hooks: {
-      ...channelHooks,
-      // A page may use its session over its WebSocket alone: each message renews the pin, as a request does, from the
-      // upgrade request the socket was opened with.
-      message: (peer, message) => {
-        pinSession(peer.request)
-        return channelHooks.message?.(peer, message)
-      },
-    },
-  })
+  const hooks = getTelefuncChannelHooks()
+  const onMessage = hooks.message
+  // A page may use its session over its WebSocket alone: each message renews the pin, as a request does, from the
+  // upgrade request the socket was opened with.
+  hooks.message = (peer, message) => {
+    pinSession(peer.request)
+    return onMessage(peer, message)
+  }
+  const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   // Factory runs only on first install. Bundler quirks can evaluate the user's entry twice in the same isolate;
   // we want every evaluation to share one transport instance.
   const broadcast = installBroadcastAdapter(() => new CloudflareBroadcastTransport({ baseInstanceName, scale }))
