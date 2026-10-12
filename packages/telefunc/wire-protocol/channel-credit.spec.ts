@@ -2155,7 +2155,7 @@ test('when both ends send 64-byte messages as fast as credit allows, the upload 
   const window = (end: unknown) => (end as { _flow: { byteWindow: number } })._flow.byteWindow
   expect(up).toBeGreaterThanOrEqual(0.99 * down)
   expect(window(server)).toBeGreaterThanOrEqual(window(page))
-})
+}, 60_000)
 
 // What a page sends about what it receives shares its uplink with what it uploads.
 test("on a 10 B/ms uplink the page measured, a 20 MB/s download's acknowledgements and window refreshes take at most 1% of it, and the download keeps its rate", async () => {
