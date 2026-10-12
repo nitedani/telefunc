@@ -555,13 +555,9 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message,
-   *  written in `message` if given. */
-  message(
-    frames: readonly Uint8Array[],
-    bytes: number,
-    message = new Uint8Array(bytes) as Uint8Array<ArrayBuffer>,
-  ): Uint8Array<ArrayBuffer> {
+  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message. */
+  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
+    const message = new Uint8Array(bytes)
     const last = frames.length - 1
     let at = 0
     for (let i = 0; i <= last; i++) {

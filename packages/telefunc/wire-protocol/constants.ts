@@ -212,9 +212,6 @@ export const WIRE_PROBE_CLOCK_MS = 1
 export const WIRE_PIECE_RATE_MARGIN = 8
 /** The most bytes a message of the whole frames sent in one turn carries (see `PieceSender`), each copied into it once. */
 export const WIRE_GATHER_BYTES = 64 * 1024
-/** The buffer consecutive messages of several frames are carved from, at most: a new buffer costs microseconds before
- *  its first byte, far more than copying a frame into one. */
-export const WIRE_ARENA_BYTES = 4 * WIRE_GATHER_BYTES
 /** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
 export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
 /** A receiver waits for the next announced message this many times as long as it takes at the rate the one before came

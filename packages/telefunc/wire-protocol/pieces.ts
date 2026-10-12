@@ -4,7 +4,6 @@ export type { SendRoom }
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
   WIRE_ANNOUNCED_WAIT_MARGIN,
-  WIRE_ARENA_BYTES,
   WIRE_GATHER_BYTES,
   WIRE_PIECES_ACK_BYTES,
   WIRE_PIECE_RATE_MARGIN,
@@ -103,9 +102,6 @@ class PieceSender {
   private gatheredSent = false
   private gatheredAtOnce = false
   private flushQueued = false
-  /** What the messages of several frames are written in, and where the next starts (see `WIRE_ARENA_BYTES`). */
-  private arena = new Uint8Array(0)
-  private arenaAt = 0
 
   constructor(
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
@@ -244,26 +240,12 @@ class PieceSender {
   flush(): void {
     const n = this.gathered.length
     if (n === 0) return
-    const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes, this.carve())
+    const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
     this.gathered.length = 0
     this.gatheredBytes = 0
     this.lastVaries = this.gatheredSent = this.gatheredAtOnce = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
-  }
-
-  /** The next `gatheredBytes` of the arena; where they don't fit, of a new one twice its size or theirs,
-   *  `WIRE_ARENA_BYTES` at most. A message larger than that has its own buffer. */
-  private carve(): Uint8Array<ArrayBuffer> {
-    const bytes = this.gatheredBytes
-    if (bytes > WIRE_ARENA_BYTES) return new Uint8Array(bytes)
-    if (this.arenaAt + bytes > this.arena.byteLength) {
-      this.arena = new Uint8Array(Math.max(bytes, Math.min(WIRE_ARENA_BYTES, 2 * this.arena.byteLength)))
-      this.arenaAt = 0
-    }
-    const at = this.arenaAt
-    this.arenaAt += bytes
-    return this.arena.subarray(at, this.arenaAt)
   }
 
   /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes, and holds the rest. */
