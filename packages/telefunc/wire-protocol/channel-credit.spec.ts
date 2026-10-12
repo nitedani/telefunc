@@ -1254,6 +1254,24 @@ test("the server acknowledges a page's message in the message of its answer", as
   expect(acks.map(([tag, , bytes]) => [tag, bytes > PIECES_ACK_BYTES])).toEqual(Array(10).fill([TAG.PIECES_ACK, true]))
 })
 
+test('a page taking a push of 128 KiB messages acknowledges them only in the messages it sends anyway, once the server measured the rate', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  let got = 0
+  page.listenBinary(() => void got++)
+  const push = async (n: number) => {
+    const until = got + n
+    for (let i = 0; i < n; i++) void server.sendBinary(new Uint8Array(128 * KIB))
+    await runUntil(() => got === until, 5_000)
+  }
+  await push(20)
+  const before = loop.sent.page.length
+  await push(200)
+  const sent = loop.sent.page.slice(before)
+  expect(sent.filter(([tag, , bytes]) => tag === TAG.PIECES_ACK && bytes === PIECES_ACK_BYTES)).toEqual([])
+  // Its window refreshes carry them.
+  expect(sent.filter(([tag]) => tag === TAG.PIECES_ACK).length).toBeGreaterThan(0)
+})
+
 test('a fresh wire carrying only small messages stops announcing them once one announcement was acknowledged, either way', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   let got = 0

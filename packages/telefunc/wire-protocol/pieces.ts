@@ -453,8 +453,9 @@ class PieceSender {
  *  `WIRE_PIECES_ACK_BYTES` of frames of any size are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`,
  *  data within `WIRE_SEND_ACK_MS`, and what it took in the message of its side's answer to it (`answering`). Any other
  *  acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one PIECES_ACK per
- *  `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them allows one (`link`, see `Link.acks`): all a sender
- *  needs that cuts its pieces by the rate it measures, and stops announcing by the rate it carries. */
+ *  `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them allows one (`link`, see `Link.acks`), a frame in
+ *  the message its side sends next: all a sender needs that cuts its pieces by the rate it measures, and stops
+ *  announcing by the rate it carries. */
 class PieceReceiver {
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
@@ -481,6 +482,8 @@ class PieceReceiver {
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
   private ackDue = 0
+  /** The acknowledgement the timer sends goes alone (see `acknowledgeIn`). */
+  private ackAlone = false
 
   /** An acknowledgement waits to go in the message its side sends next (see `PieceSender.carry`). */
   private carrying = false
@@ -503,8 +506,8 @@ class PieceReceiver {
     const announced = this.paced(bytes, at)
     if (!this.options.peerHoldsBack && !acknowledges(bytes)) return
     this.date(data, at)
-    if (!this.options.peerHoldsBack || announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES)
-      this.acknowledgeSoon()
+    if (!this.options.peerHoldsBack) this.acknowledgeSoon(true)
+    else if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
   }
 
   /** Takes an ANNOUNCE that arrived at `at`. One of no bytes opens an announcement: frames follow it at once, over a link
@@ -591,12 +594,9 @@ class PieceReceiver {
     if (this.probing > 0) {
       this.probing--
       this.acknowledge()
-    } else if (
-      this.options.peerHoldsBack
-        ? announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES
-        : whole && acknowledges(total)
-    )
-      this.acknowledgeSoon()
+    } else if (this.options.peerHoldsBack) {
+      if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+    } else if (whole && acknowledges(total)) this.acknowledgeSoon(true)
     if (!whole) return null
     const frame = this.frame
     this.frame = new Uint8Array(0)
@@ -612,24 +612,36 @@ class PieceReceiver {
       this.acknowledgeIn(WIRE_SEND_ACK_MS)
   }
 
-  private acknowledgeSoon(): void {
+  /** Acknowledges once the gap and the share allow; `withNext`, in the message its side sends next then: an
+   *  acknowledgement that only measures the rate, which its own delay dates, as a peer that holds nothing back takes
+   *  one of a frame. */
+  private acknowledgeSoon(withNext = false): void {
     const wait = Math.max(
       this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt,
       this.options.link?.acks.wait() ?? 0,
     )
-    if (wait <= 0) this.acknowledge()
-    else this.acknowledgeIn(wait)
+    if (wait > 0) this.acknowledgeIn(wait, withNext)
+    else if (withNext) this.acknowledgeWithNext()
+    else this.acknowledge()
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would. */
-  private acknowledgeIn(ms: number): void {
+  /** Acknowledges `ms` from now, or sooner where it already would; `withNext`, as `acknowledgeSoon` says, unless an
+   *  acknowledgement that doesn't wait is due by then too. */
+  private acknowledgeIn(ms: number, withNext = false): void {
+    if (!withNext) this.ackAlone = true
     const due = performance.now() + ms
     if (this.ackTimer !== null) {
       if (this.ackDue <= due) return
       clearTimeout(this.ackTimer)
     }
     this.ackDue = due
-    this.ackTimer = unrefTimer(setTimeout(() => this.acknowledge(), ms))
+    this.ackTimer = unrefTimer(
+      setTimeout(() => {
+        this.ackTimer = null
+        if (this.ackAlone) this.acknowledge()
+        else this.acknowledgeWithNext()
+      }, ms),
+    )
   }
 
   private acknowledge(): void {
@@ -646,7 +658,7 @@ class PieceReceiver {
   private acknowledgement(): Uint8Array<ArrayBuffer> {
     if (this.ackTimer !== null) clearTimeout(this.ackTimer)
     this.ackTimer = null
-    this.carrying = false
+    this.ackAlone = this.carrying = false
     this.ackedAt = performance.now()
     this.acknowledgedTook = this.took
     const span =

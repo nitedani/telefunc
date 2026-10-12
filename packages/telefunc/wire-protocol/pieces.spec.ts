@@ -190,21 +190,34 @@ test('a receiver whose peer holds data back acknowledges data within 25 ms once 
   vi.useRealTimers()
 })
 
-test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB, at most every 50 ms, and no small frames', () => {
+test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB in the next message its side sends, at most every 50 ms, and no small frames', () => {
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
-  const receiver = new PieceReceiver((frame) => void sent.push(frame), { peerHoldsBack: false, carry: () => {} })
+  let carried: (() => Uint8Array | null) | null = null
+  const receiver = new PieceReceiver((frame) => void sent.push(frame), {
+    peerHoldsBack: false,
+    carry: (ack) => void (carried = ack),
+  })
+  const next = () => {
+    const ack = carried?.() ?? null
+    carried = null
+    return ack && decode(ack)
+  }
   for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now())
   vi.advanceTimersByTime(1_000)
+  expect(carried).toBeNull()
+  receiver.arrived(20_000, true, Date.now())
+  vi.advanceTimersByTime(5)
+  expect(next()).toEqual({ tag: TAG.PIECES_ACK, bytes: 84_000, heldMs: 5, spanUs: 0 })
+  // 50 ms after that one went, which was 5 ms after the first arrived.
+  vi.advanceTimersByTime(5)
+  receiver.arrived(20_000, true, Date.now())
+  vi.advanceTimersByTime(44)
+  expect(carried).toBeNull()
+  vi.advanceTimersByTime(1)
+  expect(next()).toMatchObject({ bytes: 104_000, heldMs: 45 })
   expect(sent).toHaveLength(0)
-  receiver.arrived(20_000, true, Date.now())
-  expect(sent.map((frame) => decode(frame))).toEqual([{ tag: TAG.PIECES_ACK, bytes: 84_000, heldMs: 0, spanUs: 0 }])
-  vi.advanceTimersByTime(10)
-  receiver.arrived(20_000, true, Date.now())
-  expect(sent).toHaveLength(1)
-  vi.advanceTimersByTime(40)
-  expect(sent.map((frame) => decode(frame))[1]).toMatchObject({ bytes: 104_000, heldMs: 40 })
   vi.useRealTimers()
 })
 
