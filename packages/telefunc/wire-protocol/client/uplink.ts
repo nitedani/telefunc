@@ -4,23 +4,22 @@ import { WIRE_ACK_SHARE, WIRE_REFRESH_SHARE } from '../constants.js'
 import { DRAIN_SPAN_MS, Link, Waits, newestFastest, type SendWait } from '../link.js'
 import { TAG } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 /** A page's uplink: the rate the server takes data at, what the uplink holds at that rate, how long the frames
  *  that go at once waited behind it, how long what the server sends waits behind what the page's credit let it send,
  *  and when the page's next acknowledgement or window refresh may go. */
 class Uplink implements SendWait {
   /** In bytes per ms: the fastest of the newest rates the peer took data at, 0 before any. */
-  drainRate = DOUBLE_ZERO
+  drainRate = 0
   private readonly drainRates: number[] = []
   /** In bytes per ms, what the newest acknowledgement that spanned any time says data arrived at. */
-  private arrivalRate = DOUBLE_ZERO
+  private arrivalRate = 0
   /** The bytes and ms of arrivals not yet in a rate. */
   private spanBytes = 0
-  private spanMs = DOUBLE_ZERO
+  private spanMs = 0
   /** What the uplink holds of the bytes handed to the socket, as of `queuedAt`. */
-  private queued = DOUBLE_ZERO
-  private queuedAt = DOUBLE_ZERO
+  private queued = 0
+  private queuedAt = 0
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
   private readonly waits = new Waits()
   /** The credit the channels on this wire granted the peer that reached it, each grant on its way and when it reaches
@@ -30,10 +29,10 @@ class Uplink implements SendWait {
   private creditArrivedBytes = 0
   /** In bytes per ms: the fastest of the newest rates the peer's messages arrived at while they kept coming, 0 before
    *  any. The bytes of the span being measured, since when, and when the newest arrived. */
-  private deliveryRate = DOUBLE_ZERO
+  private deliveryRate = 0
   private readonly deliveryRates: number[] = []
   private deliveredBytes = 0
-  private deliveredFrom = DOUBLE_ZERO
+  private deliveredFrom = 0
   private deliveredAt = Number.NEGATIVE_INFINITY
   /** The span being measured started as the one before it ended, not after a pause. */
   private deliveryGoesOn = false
@@ -163,7 +162,7 @@ class Uplink implements SendWait {
 /** Frames of one kind that take at most `share` of the rate their link carries (`Link.fastest`): each waits its turn, none
  *  before a rate is measured. */
 class Share {
-  private at = DOUBLE_ZERO
+  private at = 0
 
   constructor(
     private readonly link: Link,

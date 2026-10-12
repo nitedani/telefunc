@@ -12,7 +12,6 @@ import { PieceSender } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 import { isSequencedTag } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** How much of the excess queue a round of acknowledgements sheds. */
@@ -35,17 +34,17 @@ class SendBudget {
   /** The data handed to the socket and not covered by an acknowledgement. */
   private readonly sent = new Fifo<SentData>()
   /** In ms, the server's clock from the first data an acknowledgement covered. */
-  private arrivedAt = DOUBLE_ZERO
+  private arrivedAt = 0
   /** The least one-way delay of data on the path, up to the offset between the clocks. */
   private leastDelay = Number.POSITIVE_INFINITY
   /** The least time an acknowledgement took back, up to the same offset, and how much longer the newest took: behind
    *  what the server sends, which a download fills, and no queue of the uplink's. Its wait falls no faster than time
    *  passes. */
   private leastBack = Number.POSITIVE_INFINITY
-  private lateMs = DOUBLE_ZERO
-  private lateAt = DOUBLE_ZERO
+  private lateMs = 0
+  private lateAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
-  private paceDue = DOUBLE_ZERO
+  private paceDue = 0
 
   /** `transmit` and `queued` as `PieceSender`'s. */
   constructor(

@@ -2,7 +2,6 @@ export { Link, Waits, newestFastest, DRAIN_SPAN_MS }
 export type { SendWait }
 
 import { WIRE_PIECE_RATE_WINDOW_MS } from './constants.js'
-import { DOUBLE_ZERO } from '../utils/DOUBLE_ZERO.js'
 
 /** The least span of arrivals a rate the peer took data at is measured over: a frame arrives whole, so a shorter span
  *  can count one that took longer. */
@@ -35,11 +34,11 @@ class Link {
   pathRtt = Number.POSITIVE_INFINITY
   /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed.
    *  Past `WIRE_PIECE_RATE_WINDOW_MS` after it last rose, the next measure replaces it. 0 before any. */
-  fastest = DOUBLE_ZERO
-  private roseAt = DOUBLE_ZERO
+  fastest = 0
+  private roseAt = 0
   /** In bytes per ms, a rate the link carries at least, by what crossed by an answer, a heartbeat or an
    *  acknowledgement. */
-  floor = DOUBLE_ZERO
+  floor = 0
 
   /** Takes a round trip a probe on this wire took. */
   measured(rtt: number): void {

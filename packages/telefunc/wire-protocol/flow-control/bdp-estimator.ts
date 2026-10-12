@@ -10,7 +10,6 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import type { Link, SendWait } from '../link.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 /** Per-axis verdict on a settled probe. `grow` = the sample saturated ≥ 2/3 of the current window, which is not at
  *  cap, and for the byte window, the sample leaves the sender's queue out: taken at the path's round trip where an
@@ -47,7 +46,7 @@ class BdpEstimator {
   /** The number of the ping in flight, or the last one. */
   private _ping = 0
   private _pingInFlight = false
-  private _pingSentAt = DOUBLE_ZERO
+  private _pingSentAt = 0
   /** Attach probes not answered yet. Each measures its wire's round trip and settles no growth, so none holds up a ping:
    *  one lost with its wire, or with an upgrade that didn't happen, costs nothing. */
   private _attachProbes: { probe: number; sentAt: number; link: Link }[] = []
@@ -58,7 +57,7 @@ class BdpEstimator {
   private _boundRtt = Infinity
   private _lastPingAt = Number.NEGATIVE_INFINITY
   /** How long the ping in flight waited behind this side's own data on its wire. */
-  private _pingWait = DOUBLE_ZERO
+  private _pingWait = 0
   /** What the next `growBytes` takes the byte window to where the last settled probe sized it, else 0: it doubles. */
   private _grownWindow = 0
   /** The byte window grew since the last ping went out. */

@@ -1,16 +1,15 @@
 export { SocketWait }
 
 import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../link.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 /** On the server, how long the frames that go at once wait behind what its socket holds (see `SendWait`): what the
  *  runtime says the socket holds, over the fastest of the newest rates it drained at while it held data. Where the
  *  runtime hides it, none. */
 class SocketWait implements SendWait {
-  private drainRate = DOUBLE_ZERO
+  private drainRate = 0
   private readonly drainRates: number[] = []
   /** The span being measured: when it started, what the socket held then, and the bytes handed since. */
-  private spanFrom = DOUBLE_ZERO
+  private spanFrom = 0
   private spanHeld = 0
   private spanHanded = 0
   private readonly waits = new Waits()

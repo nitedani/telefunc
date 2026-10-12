@@ -14,7 +14,6 @@ import {
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
 import { Fifo } from '../../utils/Fifo.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
@@ -87,8 +86,8 @@ class FlowControl {
   private _leastBacklog = Infinity
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.
-  private _prevBucket = DOUBLE_ZERO
-  private _curBucket = DOUBLE_ZERO
+  private _prevBucket = 0
+  private _curBucket = 0
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 

@@ -1,7 +1,6 @@
 export { Heartbeat }
 
 import { Deliveries } from '../deliveries.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 /** Ping-then-pong-deadline loop. Each transport owns one for its wire; the upgrade probe
  *  flow constructs a transient instance for the probed wire until the swap commits. */
@@ -9,7 +8,7 @@ class Heartbeat {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
-  private lastReceivedAt = DOUBLE_ZERO
+  private lastReceivedAt = 0
   private readonly deliveries = new Deliveries()
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
   private expectedBy = () => 0
