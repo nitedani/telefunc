@@ -403,9 +403,8 @@ describe("the session Durable Object's pin", () => {
   function sessionObject(kv: KVNamespace) {
     const { binding } = createBinding()
     const tf = new Telefunc()
-    const ctx = { id: { name: 'telefunc-shard-weur-0' } }
     const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
-    const instance = new tf.TelefuncDurableObject(ctx as unknown as DurableObjectState, env) as unknown as {
+    const instance = new tf.TelefuncDurableObject({} as DurableObjectState, env) as unknown as {
       fetch(request: Request): Promise<Response>
     }
     const request = (token: string) =>
