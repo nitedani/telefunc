@@ -15,6 +15,8 @@ function createPeer(frames: Uint8Array[]) {
         if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW) return
         frames.push(frame)
       },
+      // It carries only WINDOWs, which `send` leaves out.
+      carry() {},
       bufferedAmount: () => 0,
       deliveredBeforeFrame: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),

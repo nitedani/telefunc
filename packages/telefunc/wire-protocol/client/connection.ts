@@ -39,7 +39,7 @@ import {
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
-import { PieceReceiver, PieceSender, carriedAckBytes } from '../pieces.js'
+import { PieceReceiver, PieceSender, carriedBytes } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -201,7 +201,16 @@ function settledOrAborted(promise: Promise<unknown>, signal: AbortSignal): Promi
  *  leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
 
-type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'urgent-flow-control' | 'ack' | 'data' | 'heartbeat'
+/** `acknowledgement`: a WINDOW that only acknowledges what arrived, which may go in the next message the wire sends. */
+type OutboundFrameKind =
+  | 'reconcile'
+  | 'control'
+  | 'flow-control'
+  | 'urgent-flow-control'
+  | 'acknowledgement'
+  | 'ack'
+  | 'data'
+  | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -248,7 +257,7 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean, withNext: boolean): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
@@ -848,16 +857,17 @@ class ClientConnection implements MuxConnection {
     this.sendOrQueue(ix, seq, buildFrame(ix, seq), 'control')
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean, withNext: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0), urgent)
+    const frame = encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0)
+    this.sendFlowControl(ix, frame, urgent ? 'urgent-flow-control' : withNext ? 'acknowledgement' : 'flow-control')
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.msgWindow(ix, limit), urgent)
+    this.sendFlowControl(ix, encode.msgWindow(ix, limit), urgent ? 'urgent-flow-control' : 'flow-control')
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
@@ -887,12 +897,16 @@ class ClientConnection implements MuxConnection {
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
    *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
    *  to advertise it again. */
-  private sendFlowControl(ix: number, frame: Uint8Array<ArrayBuffer>, urgent = false): void {
+  private sendFlowControl(
+    ix: number,
+    frame: Uint8Array<ArrayBuffer>,
+    kind: 'flow-control' | 'urgent-flow-control' | 'acknowledgement' = 'flow-control',
+  ): void {
     if (!this.canSendImmediately(ix)) {
       this.queued().push({ frame, channelIx: ix, seq: undefined })
       return
     }
-    this.transport.sendFrame({ kind: urgent ? 'urgent-flow-control' : 'flow-control', frame })
+    this.transport.sendFrame({ kind, frame })
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
@@ -1943,17 +1957,14 @@ class WsTransport implements UpgradeTarget {
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
       const now = performance.now()
-      const message = receiveMessage(ws, pieces, data, now)
-      if (message === null) return
-      const { ack, frame } = message
-      if (ack !== null && !budget.acknowledged(ack.bytes, ack.heldMs, ack.spanUs)) return ws.close()
-      if (frame === null) return
-      if (frame.tag === TAG.PONG) {
-        sender.heartbeat(frame.took, now)
-        onPong?.()
-        return
+      for (const { frame, byteLength } of receiveMessage(ws, pieces, data, now) ?? []) {
+        if (frame.tag === TAG.PIECES_ACK) {
+          if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return ws.close()
+        } else if (frame.tag === TAG.PONG) {
+          sender.heartbeat(frame.took, now)
+          onPong?.()
+        } else onFrame?.(frame, byteLength)
       }
-      onFrame?.(frame, message.byteLength)
     }
     ws.onclose = () => {
       if (this.probed?.ws === ws) this.probed = null
@@ -2125,21 +2136,16 @@ class WsTransport implements UpgradeTarget {
       this.heartbeat?.noteReceived((data as ArrayBuffer).byteLength, now)
       link.delivered((data as ArrayBuffer).byteLength, now)
       budget.received()
-      const message = receiveMessage(ws, pieces, data, now)
-      if (message === null) return
-      const { ack, frame } = message
-      if (ack !== null) {
-        if (!budget.acknowledged(ack.bytes, ack.heldMs, ack.spanUs)) return ws.close()
-        this.onRoom(sender)
+      for (const { frame, byteLength } of receiveMessage(ws, pieces, data, now) ?? []) {
+        if (frame.tag === TAG.PIECES_ACK) {
+          if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return ws.close()
+          this.onRoom(sender)
+        } else if (frame.tag === TAG.PONG) {
+          sender.heartbeat(frame.took, now)
+          this.heartbeat?.resetPong()
+          this.owner._onTransportPong(frame.ended)
+        } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandonedWs)
       }
-      if (frame === null) return
-      if (frame.tag === TAG.PONG) {
-        sender.heartbeat(frame.took, now)
-        this.heartbeat?.resetPong()
-        this.owner._onTransportPong(frame.ended)
-        return
-      }
-      this.owner._onTransportFrame(frame, this, message.byteLength, ws === this.abandonedWs)
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -2166,7 +2172,8 @@ class WsTransport implements UpgradeTarget {
 
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.budget)
-    this.budget.send(frame.frame, this.pingInterval)
+    if (frame.kind === 'acknowledgement') this.budget.sender.carry(() => frame.frame)
+    else this.budget.send(frame.frame, this.pingInterval)
   }
 
   sendRoom(): number {
@@ -2239,38 +2246,36 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-type PiecesAckFrame = Extract<DecodedFrame, { tag: typeof TAG.PIECES_ACK }>
-
-/** What a WebSocket message that arrived at `at` carries: a PIECES_ACK, and the frame it completes, null for a piece
- *  before its frame's last; or null for bytes that close `ws`. Its receiver acknowledges it as `PieceReceiver` says. */
+/** The frames a WebSocket message that arrived at `at` carries, those it carried ahead of its own first, none for a
+ *  piece before its frame's last; or null for bytes that close `ws`. Its receiver acknowledges it as `PieceReceiver`
+ *  says. */
 function receiveMessage(
   ws: WebSocket,
   pieces: PieceReceiver,
   data: unknown,
   at: number,
-): { ack: PiecesAckFrame | null; frame: DecodedFrame | null; byteLength: number } | null {
+): { frame: DecodedFrame; byteLength: number }[] | null {
   try {
     let raw = new Uint8Array(data as ArrayBuffer)
-    let ack: PiecesAckFrame | null = null
-    const carried = carriedAckBytes(raw)
-    if (carried > 0) {
-      ack = decode(raw.subarray(0, carried)) as PiecesAckFrame
+    const frames: { frame: DecodedFrame; byteLength: number }[] = []
+    for (let carried = carriedBytes(raw); carried > 0; carried = carriedBytes(raw)) {
+      frames.push({ frame: decode(raw.subarray(0, carried)), byteLength: carried })
       pieces.tookCarried(carried)
       raw = raw.subarray(carried)
     }
     let frame = decode(raw)
     if (frame.tag === TAG.ANNOUNCE) {
       pieces.announce(frame.bytes, at, frame.floor)
-      return { ack, frame: null, byteLength: raw.byteLength }
+      return frames
     }
     if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece, at)
-      if (whole === null) return { ack, frame: null, byteLength: raw.byteLength }
+      if (whole === null) return frames
       raw = whole
       frame = decode(raw)
     } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
-    if (frame.tag === TAG.PIECES_ACK) return { ack: frame, frame: null, byteLength: raw.byteLength }
-    return { ack, frame, byteLength: raw.byteLength }
+    frames.push({ frame, byteLength: raw.byteLength })
+    return frames
   } catch {
     ws.close()
     return null
@@ -2760,6 +2765,7 @@ class SseTransport implements UpgradeSource {
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs
       case 'flow-control':
+      case 'acknowledgement':
       case 'ack':
       case 'data':
         // A throttle after the last POST started, not after this frame: a frame that comes as that POST's credit

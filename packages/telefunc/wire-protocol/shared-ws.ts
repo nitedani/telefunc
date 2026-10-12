@@ -114,8 +114,8 @@ const TAG = {
   PIECE: 0x0a as const,
   /** Back, as `PieceReceiver` says, for the frames and pieces that arrived. Payload: u32, the bytes of them it took in
    *  all (mod 2^32), u32, the ms it held the newest, then u32, the µs between the arrival of the newest data and of the
-   *  newest the ack before covered, 0 for the first, or where it covers none. A message may carry one ahead of another
-   *  frame (see `PieceSender.carry`). */
+   *  newest the ack before covered, 0 for the first, or where it covers none. On a WebSocket, a message may carry one
+   *  ahead of another frame (see `PieceSender.carry`). */
   PIECES_ACK: 0x0b as const,
   /** Either way on a WebSocket: the bytes of the frames that follow it at once, whole or in pieces, which its receiver
    *  waits for at the rate they arrive (see `pieces.ts`). Payload: u32, their bytes. Its header's seq: the bytes per s

@@ -1281,6 +1281,47 @@ test.each(['page', 'server'] as const)(
   },
 )
 
+/** The bytes the page's replay holds for `page`'s channel. */
+const pageReplayBytes = (page: unknown) =>
+  [
+    ...(
+      page as { _connection: { replayBuffers: Map<number, { byteLength: number }> } }
+    )._connection.replayBuffers.values(),
+  ][0]!.byteLength
+const WINDOW_BYTES = encode.window(0, 0, 0).byteLength
+
+test("a page acknowledges the answers it receives in the next message it sends, and the server's replay lets them go", async () => {
+  const { server, page } = loop.open<string, string>()
+  server.listen((text) => text)
+  await run(100)
+  const before = loop.sent.page.length
+  for (let i = 0; i < 10; i++) {
+    let answered = false
+    void page.send('x'.repeat(256 * KIB), { ack: true }).then(() => (answered = true))
+    while (!answered) await run(1)
+  }
+  const windows = loop.sent.page.slice(before).filter(([tag]) => tag === TAG.WINDOW)
+  // Each rides the request after it.
+  expect(windows.filter(([, , bytes]) => bytes === WINDOW_BYTES)).toEqual([])
+  expect(windows.length).toBeGreaterThan(0)
+  // The last answers' acknowledgement goes with the next heartbeat at the latest.
+  await run(CHANNEL_PING_INTERVAL_MS + 100)
+  expect((server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer.byteLength).toBe(0)
+})
+
+test("the server acknowledges at its heartbeat in its PONG's message, and the page's replay lets go of what it sent", async () => {
+  const { server, page } = loop.open<string, string>()
+  server.listen(() => {})
+  await run(100)
+  const before = loop.sent.server.length
+  void page.send('x')
+  await run(CHANNEL_PING_INTERVAL_MS + 100)
+  const sent = loop.sent.server.slice(before)
+  expect(sent.filter(([tag, , bytes]) => tag === TAG.WINDOW && bytes === WINDOW_BYTES)).toEqual([])
+  expect(sent.filter(([tag, , bytes]) => tag === TAG.WINDOW && bytes > WINDOW_BYTES)).toHaveLength(1)
+  expect(pageReplayBytes(page)).toBe(0)
+})
+
 test('a page taking a push of 128 KiB messages acknowledges them only in the messages it sends anyway, once the server measured the rate', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   let got = 0

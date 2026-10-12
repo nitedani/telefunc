@@ -8,6 +8,8 @@ import type { SendWait } from '../link.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
+  /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
+  carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
   bufferedAmount(): number | undefined
   /** How long the frames that go at once wait behind what the wire holds. */
@@ -85,9 +87,12 @@ class IndexedPeer {
     this.sendSequenced(seq, encode.error(this.index, reason, seq))
   }
 
-  /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
-  sendByteWindowUpdate(limit: number, lastSeq: number): void {
-    this.sendCtrl(encode.window(this.index, limit, lastSeq))
+  /** `lastSeq`: the last seq the server has of what the page sent on the channel. `withNext`: see
+   *  `FlowControlEmit.byteWindowUpdate`. */
+  sendByteWindowUpdate(limit: number, lastSeq: number, withNext = false): void {
+    const frame = encode.window(this.index, limit, lastSeq)
+    if (withNext) this.sender.carry(frame)
+    else this.sendCtrl(frame)
   }
 
   sendMsgWindowUpdate(limit: number): void {

@@ -45,7 +45,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceReceiver, PieceSender, carriedAckBytes } from '../pieces.js'
+import { PieceReceiver, PieceSender, carriedBytes } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from '../link.js'
 import type { ServerChannel } from './channel.js'
@@ -313,6 +313,11 @@ class ChannelMux {
       transport: transport as ServerTransport<unknown>,
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
+        carry: (frame) => {
+          const pieces = this.connectionEntries.get(connection)?.state.pieces
+          if (pieces) pieces.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
+          else this.send(connection, frame as Uint8Array<ArrayBuffer>)
+        },
         bufferedAmount: () => this.bufferedAmount(connection),
         sendWait: () => wait,
         deliveredBeforeFrame: (ms) => {
@@ -402,22 +407,28 @@ class ChannelMux {
   private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
-    const carried = carriedAckBytes(rawFrame)
-    if (carried > 0) {
-      if (!this.takeCarriedAck(entry, connection, rawFrame.subarray(0, carried))) return Promise.resolve(null)
+    // A WINDOW it carried is handled in turn, as if it came alone: counted as taken here.
+    const carriedWindows: Promise<unknown>[] = []
+    for (let carried = carriedBytes(rawFrame); carried > 0; carried = carriedBytes(rawFrame)) {
+      const frame = rawFrame.subarray(0, carried)
       rawFrame = rawFrame.subarray(carried)
+      if (!this.takeCarried(entry, connection, frame)) return Promise.resolve(null)
+      if (frame[0] === TAG.WINDOW) carriedWindows.push(this.dispatchFrame(entry, connection, frame, true))
     }
-    return this.dispatchFrame(entry, connection, rawFrame, false)
+    const outcome = this.dispatchFrame(entry, connection, rawFrame, false)
+    return carriedWindows.length === 0 ? outcome : Promise.all(carriedWindows).then(() => outcome)
   }
 
-  /** Takes the PIECES_ACK a message carried ahead of its frame. Returns false if it terminated the wire for it. */
-  private takeCarriedAck(entry: ConnectionEntry, connection: Wire, raw: Uint8Array<ArrayBuffer>): boolean {
+  /** Takes a frame a message carried ahead of another, and the PIECES_ACK it is. Returns false if it terminated the
+   *  wire for it. */
+  private takeCarried(entry: ConnectionEntry, connection: Wire, raw: Uint8Array<ArrayBuffer>): boolean {
     try {
+      const { pieces } = entry.state
+      assertProtocol(pieces, 'a frame carried on a wire that takes no pieces')
+      pieces.receiver.tookCarried(raw.byteLength)
+      if (raw[0] !== TAG.PIECES_ACK) return true
       const ack = decodeClientFrame(raw, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
       assert(ack.tag === TAG.PIECES_ACK)
-      const { pieces } = entry.state
-      assertProtocol(pieces, 'PIECES_ACK on a wire that takes no pieces')
-      pieces.receiver.tookCarried(raw.byteLength)
       assertProtocol(pieces.sender.acknowledged(ack.bytes, ack.heldMs, ack.spanUs), 'PIECES_ACK for nothing sent')
       return true
     } catch (err) {

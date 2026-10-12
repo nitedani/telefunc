@@ -1,4 +1,4 @@
-export { PieceSender, PieceReceiver, carriedAckBytes }
+export { PieceSender, PieceReceiver, carriedBytes }
 export type { SendRoom }
 
 import {
@@ -30,14 +30,19 @@ function announcedNext(last: number, floor: number): number {
   return last === 0 && floor === 0 ? WIRE_PROBE_FIRST_BYTES : Math.max(2 * last, WIRE_ANNOUNCED_MIN_BYTES)
 }
 
-/** The bytes a PIECE and an ANNOUNCE add to what they carry, and a PIECES_ACK's. */
+/** The bytes a PIECE and an ANNOUNCE add to what they carry. */
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
 const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
-const PIECES_ACK_BYTES = encode.piecesAck(0, 0, 0).byteLength
+/** The bytes of each frame a message may carry ahead of another (see `PieceSender.carry`), by tag. */
+const CARRIED_BYTES: Partial<Record<number, number>> = {
+  [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
+  [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
+}
 
-/** The bytes of the PIECES_ACK `message` carries ahead of its frame (see `PieceSender.carry`), 0 for none. */
-function carriedAckBytes(message: Uint8Array): number {
-  return message[0] === TAG.PIECES_ACK && message.byteLength > PIECES_ACK_BYTES ? PIECES_ACK_BYTES : 0
+/** The bytes of the frame `message` carries ahead of another (see `PieceSender.carry`), 0 for none. */
+function carriedBytes(message: Uint8Array): number {
+  const bytes = CARRIED_BYTES[message[0]!] ?? 0
+  return message.byteLength > bytes ? bytes : 0
 }
 
 /** How much data a sender hands its socket: a page's `SendBudget`. */
@@ -100,9 +105,9 @@ class PieceSender {
   private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
-  /** The acknowledgement the next message it sends carries (see `carry`), and once counted, its bytes. */
-  private carried: (() => Uint8Array<ArrayBuffer> | null) | null = null
-  private riding: Uint8Array<ArrayBuffer> | null = null
+  /** The frames the next message it sends carries (see `carry`), and once counted, their bytes. */
+  private readonly carried: (() => Uint8Array<ArrayBuffer> | null)[] = []
+  private riding: Uint8Array<ArrayBuffer>[] = []
 
   constructor(
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
@@ -118,10 +123,10 @@ class PieceSender {
     return this.transmittedBytes + this.heldBytes
   }
 
-  /** The next message it hands the socket carries the PIECES_ACK `ack` returns as that frame is sent, if any, ahead of
-   *  it in one message. */
-  carry(ack: () => Uint8Array<ArrayBuffer> | null): void {
-    this.carried = ack
+  /** The next message it hands the socket carries the frame `frame` returns as that message is sent, if any, ahead of
+   *  it in one message: a PIECES_ACK, or a WINDOW that only acknowledges. */
+  carry(frame: () => Uint8Array<ArrayBuffer> | null): void {
+    this.carried.push(frame)
   }
 
   /** Sends `frame`, whole or in pieces. */
@@ -409,26 +414,32 @@ class PieceSender {
     this.release()
   }
 
-  /** Counts the acknowledgement carried, ahead of what is sent next, which hands it to the socket. */
+  /** Counts the frames carried, ahead of what is sent next, which hands them to the socket. */
   private takeCarried(): void {
-    if (this.carried === null || this.riding !== null) return
-    const ack = this.carried()
-    this.carried = null
-    if (ack === null) return
-    this.link.acks.handed(ack.byteLength)
-    this.transmitted(ack.byteLength, false)
-    this.riding = ack
+    for (const take of this.carried.splice(0)) {
+      const frame = take()
+      if (frame === null) continue
+      ;(frame[0] === TAG.PIECES_ACK ? this.link.acks : this.link.refreshes).handed(frame.byteLength)
+      this.transmitted(frame.byteLength, false)
+      this.riding.push(frame)
+    }
   }
 
-  /** Hands the socket `message`, behind the acknowledgement riding on it. */
+  /** Hands the socket `message`, behind the frames riding on it. */
   private hand(message: Uint8Array<ArrayBuffer>): void {
+    if (this.riding.length === 0) return this.transmit(message)
     const riding = this.riding
-    if (riding === null) return this.transmit(message)
-    this.riding = null
-    const both = new Uint8Array(riding.byteLength + message.byteLength)
-    both.set(riding)
-    both.set(message, riding.byteLength)
-    this.transmit(both)
+    this.riding = []
+    let bytes = message.byteLength
+    for (const frame of riding) bytes += frame.byteLength
+    const all = new Uint8Array(bytes)
+    let at = 0
+    for (const frame of riding) {
+      all.set(frame, at)
+      at += frame.byteLength
+    }
+    all.set(message, at)
+    this.transmit(all)
   }
 
   /** Sends what waited for room, as far as it goes now, and the frames held behind it. */
@@ -495,7 +506,7 @@ class PieceReceiver {
     private readonly options: {
       peerHoldsBack: boolean
       link?: Link
-      carry: (ack: () => Uint8Array<ArrayBuffer> | null) => void
+      carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
     },
   ) {}
 
@@ -557,7 +568,7 @@ class PieceReceiver {
       this.acknowledgeWithNext()
   }
 
-  /** Takes the PIECES_ACK of `bytes` a message carried ahead of its frame: taken, as an ANNOUNCE is, not dated. */
+  /** Takes the frame of `bytes` a message carried ahead of another: taken, as an ANNOUNCE is, not dated. */
   tookCarried(bytes: number): void {
     this.took += bytes
   }

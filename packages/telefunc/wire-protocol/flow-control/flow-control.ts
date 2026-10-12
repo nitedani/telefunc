@@ -19,8 +19,9 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
  *  arrived (see `constants.ts`). */
 interface FlowControlEmit {
   /** `urgent`: past half its window has been consumed since the last urgent limit, so the peer may be close to
-   *  blocking: a transport that batches should send it at once. */
-  byteWindowUpdate(limit: number, urgent: boolean): void
+   *  blocking: a transport that batches should send it at once. `withNext`: it only acknowledges what arrived, so it
+   *  may go in the next message its wire sends. */
+  byteWindowUpdate(limit: number, urgent: boolean, withNext: boolean): void
   msgWindowUpdate(limit: number, urgent: boolean): void
   bdpPing(probe: number): void
 }
@@ -254,13 +255,13 @@ class FlowControl {
   onReceivedUncounted(bytes: number): void {
     this._arrived = true
     this._uncountedBytes += bytes
-    if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes()
+    if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes(true)
   }
 
   /** Receiver-side, at each heartbeat: a `WINDOW` for what arrived since the last, so the sender's replay lets it go
    *  while the channel is quiet. */
   acknowledge(): void {
-    if (this._arrived) this._advertiseBytes()
+    if (this._arrived) this._advertiseBytes(true)
   }
 
   /** Receiver-side: this side answered the newest frame that arrived, which tells the sender it has every frame before
@@ -415,7 +416,8 @@ class FlowControl {
     if (messages) this._advertiseMessages()
   }
 
-  private _advertiseBytes(): void {
+  /** `acknowledging`: it goes to acknowledge what arrived, not for a limit that was due. */
+  private _advertiseBytes(acknowledging = false): void {
     if (!this._fitted) return
     this._advertisedBytes = this._consumedBytes
     const limit = this._consumedBytes + this.byteWindow
@@ -427,7 +429,7 @@ class FlowControl {
     this._arrived = false
     const urgent = (this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow
     if (urgent) this._urgentBytes = this._consumedBytes
-    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0, urgent)
+    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0, urgent, acknowledging && !urgent)
   }
 
   private _advertiseMessages(): void {

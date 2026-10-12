@@ -171,6 +171,7 @@ describe('keyed in-process broadcast', () => {
       new IndexedPeer(
         {
           send: (frame) => void sent.push(decode(frame)),
+          carry: (frame) => void sent.push(decode(frame)),
           bufferedAmount: () => 0,
           deliveredBeforeFrame: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -206,6 +207,7 @@ describe('keyed in-process broadcast', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          carry: (frame) => void frames.push(frame),
           bufferedAmount: () => 0,
           deliveredBeforeFrame: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -237,6 +239,7 @@ describe('keyed in-process broadcast', () => {
             send: (frame) => {
               frames.push(frame)
             },
+            carry: (frame) => void frames.push(frame),
             bufferedAmount: () => 0,
             deliveredBeforeFrame: () => 0,
             sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -366,6 +369,7 @@ describe('Broadcast shield validation', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          carry: (frame) => void frames.push(frame),
           bufferedAmount: () => 0,
           deliveredBeforeFrame: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
@@ -401,6 +405,7 @@ describe('Broadcast shield validation', () => {
       new IndexedPeer(
         {
           send: () => {},
+          carry: () => {},
           bufferedAmount: () => 0,
           deliveredBeforeFrame: () => 0,
           sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),

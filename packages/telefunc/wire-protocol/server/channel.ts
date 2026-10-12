@@ -165,7 +165,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = id ?? crypto.randomUUID()
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq),
+        byteWindowUpdate: (limit, _urgent, withNext) =>
+          this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, withNext),
         msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
         bdpPing: (probe) => this._peer?.sendBdpPing(probe),
       },
