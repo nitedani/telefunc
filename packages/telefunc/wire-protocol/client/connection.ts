@@ -411,10 +411,10 @@ class ClientConnection implements MuxConnection {
   /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
   private sendBuffer: BufferedFrame[] = []
   /** Sequenced frames that wait only for the transport's room, in the order they go: what a channel that may send sends
-   *  next waits behind them. Moved to the front of sendBuffer once sends are held (see `queued`). */
+   *  next waits behind them. Moved to the front of sendBuffer once sends are held (see `settleQueue`). */
   private heldForRoom = new Fifo<SequencedFrame>()
   private heldForRoomBytes = 0
-  /** Channels whose queued frames go, all in one pass when they're next read (see `queued`). */
+  /** Channels whose queued frames go, all in one pass when they're next read (see `settleQueue`). */
   private droppedQueues = new Set<number>()
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
@@ -687,7 +687,7 @@ class ClientConnection implements MuxConnection {
    *  acknowledges some (see `SendBudget`). The frames that go at once pass what waits. */
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
-      this.queued().push({ frame, channelIx: ix, seq })
+      this.settleQueue().push({ frame, channelIx: ix, seq })
       return
     }
     // What it held goes first.
@@ -795,7 +795,7 @@ class ClientConnection implements MuxConnection {
   /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait. */
   private sendUnsequenced(ix: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
-      this.queued().push({ frame, channelIx: ix, seq: undefined })
+      this.settleQueue().push({ frame, channelIx: ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind, frame })
@@ -1385,7 +1385,7 @@ class ClientConnection implements MuxConnection {
     if (
       !this.connected ||
       this.ttl ||
-      this.queued().length > 0 ||
+      this.settleQueue().length > 0 ||
       this.heldForRoom.length > 0 ||
       this.openChannelCount() > 0
     )
@@ -1501,7 +1501,7 @@ class ClientConnection implements MuxConnection {
     }
     // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
     if (subscribing.size > 0)
-      this.sendBuffer = this.queued().filter(
+      this.sendBuffer = this.settleQueue().filter(
         ({ channelIx, frame }) =>
           !subscribing.has(channelIx) || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
       )
@@ -1523,7 +1523,7 @@ class ClientConnection implements MuxConnection {
     const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
-    for (const { channelIx, seq } of this.queued())
+    for (const { channelIx, seq } of this.settleQueue())
       if (seq !== undefined && this.isSendable(channelIx) && !this.inFlight.carriedFrom.has(channelIx))
         this.inFlight.carriedFrom.set(channelIx, seq)
     return this.drainBufferedFrames(this.isSendable)
@@ -1714,7 +1714,7 @@ class ClientConnection implements MuxConnection {
    *  used, their sequenced frames wait for room behind what already does. What the others queued stays. */
   private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
-    const sendBuffer = this.queued()
+    const sendBuffer = this.settleQueue()
     let room = this.transport.sendRoom()
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
@@ -1754,7 +1754,7 @@ class ClientConnection implements MuxConnection {
   }
 
   /** sendBuffer, with what waited for room in front of it once sends are held: a reconcile takes them all in order. */
-  private queued(): BufferedFrame[] {
+  private settleQueue(): BufferedFrame[] {
     this.dropQueues()
     if (!this.sendsOpen && this.heldForRoom.length > 0) {
       this.sendBuffer = [...this.heldForRoom, ...this.sendBuffer]
@@ -1767,7 +1767,7 @@ class ClientConnection implements MuxConnection {
   /** The channels whose frames wait to go. */
   private queuedIxes(): Set<number> {
     const ixes = new Set<number>()
-    for (const { channelIx } of this.queued()) ixes.add(channelIx)
+    for (const { channelIx } of this.settleQueue()) ixes.add(channelIx)
     for (const { channelIx } of this.heldForRoom) ixes.add(channelIx)
     return ixes
   }
