@@ -285,6 +285,24 @@ type ReconcileOutcome = {
   reconcileComplete: boolean
 }
 
+/** The RECONCILE in flight. */
+type ReconcileInFlight = {
+  /** The channels it lists, and whether as `initial`. */
+  ixes: Map<number, boolean>
+  /** The probes it carries, by channel: its RECONCILED answers each a BDP_PING_ACK didn't. */
+  probes: Map<number, number>
+  /** Per channel, the first seq it carries behind it on its wire. Its RECONCILED replays only what comes before: the wire
+   *  delivers the rest after the RECONCILE, or is gone, and the next one's RECONCILE replays it. */
+  carriedFrom: Map<number, number>
+  /** The attach results of channels it lists, applied with its RECONCILED, which the server may have built before them
+   *  (an SSE batch POST's RECONCILED goes once the POST's body is read). */
+  attachResults: Map<number, number | null>
+}
+
+function reconcileInFlight(): ReconcileInFlight {
+  return { ixes: new Map(), probes: new Map(), carriedFrom: new Map(), attachResults: new Map() }
+}
+
 type ReconcileBatch = {
   reconcileFrame: OutboundFrame
   movedBufferedFrames: OutboundFrame[]
@@ -502,20 +520,11 @@ class ClientConnection implements MuxConnection {
   /** The wire the last RECONCILED came on. */
   private reconciledWire = -1
   private nextIndex = 0
-  /** What the RECONCILE in flight lists, and whether as `initial`. */
-  private reconcileIxes = new Map<number, boolean>()
-  /** The probes the RECONCILE in flight carries, by channel: its RECONCILED answers each a BDP_PING_ACK didn't. */
-  private reconcileProbes = new Map<number, number>()
+  private inFlight = reconcileInFlight()
   /** Initial channels a RECONCILED left out because the server hadn't registered them, until their ATTACH_RESULT, which
    *  comes on the wire awaiting them, the old one or, after a barrier, the WebSocket. What they queue waits for it, so
    *  their replay goes first. */
   private awaitedIxes = new Set<number>()
-  /** The attach results of channels the RECONCILE in flight lists, applied with its RECONCILED, which the server may have
-   *  built before them (an SSE batch POST's RECONCILED goes once the POST's body is read). */
-  private earlyAttachResults = new Map<number, number | null>()
-  /** Per channel, the first seq the RECONCILE in flight carries behind it on its wire. Its RECONCILED replays only what
-   *  comes before: the wire delivers the rest after the RECONCILE, or is gone, and the next one's RECONCILE replays it. */
-  private carriedFrom = new Map<number, number>()
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
@@ -1276,7 +1285,7 @@ class ClientConnection implements MuxConnection {
       if (ctrl.upgradeId !== committing.upgradeId) return
       committing.committed = true
     }
-    for (const [ix, probe] of this.reconcileProbes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
+    for (const [ix, probe] of this.inFlight.probes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
     this.transport.applyReconciledSettings(ctrl)
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
@@ -1531,9 +1540,7 @@ class ClientConnection implements MuxConnection {
    *  the next wire's RECONCILE lists them again. */
   private forgetWire(): void {
     this.awaitedIxes.clear()
-    this.earlyAttachResults.clear()
-    this.reconcileIxes.clear()
-    this.reconcileProbes.clear()
+    this.inFlight = reconcileInFlight()
     this.exitReconciling()
   }
 
@@ -1600,9 +1607,7 @@ class ClientConnection implements MuxConnection {
     batched: boolean
   }): ReconcileOpenEntry[] {
     this.enterReconciling()
-    this.reconcileIxes = new Map()
-    this.reconcileProbes = new Map()
-    this.carriedFrom = new Map()
+    this.inFlight = reconcileInFlight()
     const open: ReconcileOpenEntry[] = []
     const subscribing = new Set<number>()
     for (const [ix, entry] of this.channels) {
@@ -1613,7 +1618,7 @@ class ClientConnection implements MuxConnection {
       }
       const isInitial = entry.state.tag !== 'open' && entry.state.initial
       if (skipUnnamed && isInitial && !this.awaitedIxes.has(ix)) continue
-      this.reconcileIxes.set(ix, isInitial)
+      this.inFlight.ixes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: entry.channel.id,
         ix,
@@ -1621,7 +1626,7 @@ class ClientConnection implements MuxConnection {
       }
       if (isInitial) payloadEntry.initial = true
       const state = entry.channel._reattachState(link, batched)
-      if (state.probe !== undefined) this.reconcileProbes.set(ix, state.probe)
+      if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
       open.push(payloadEntry)
@@ -1651,8 +1656,8 @@ class ClientConnection implements MuxConnection {
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     for (const { channelIx, seq } of this.queued())
-      if (seq !== undefined && this.isSendable(channelIx) && !this.carriedFrom.has(channelIx))
-        this.carriedFrom.set(channelIx, seq)
+      if (seq !== undefined && this.isSendable(channelIx) && !this.inFlight.carriedFrom.has(channelIx))
+        this.inFlight.carriedFrom.set(channelIx, seq)
     return this.drainBufferedFrames(this.isSendable)
   }
 
@@ -1695,15 +1700,11 @@ class ClientConnection implements MuxConnection {
 
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
-    const reconcileIxes = this.reconcileIxes
-    this.reconcileIxes = new Map()
-    const attachResults = this.earlyAttachResults
-    this.earlyAttachResults = new Map()
-    const carriedFrom = this.carriedFrom
-    this.carriedFrom = new Map()
+    const { ixes, attachResults, carriedFrom } = this.inFlight
+    this.inFlight = reconcileInFlight()
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
-    for (const [ix, initial] of reconcileIxes) {
+    for (const [ix, initial] of ixes) {
       this.awaitedIxes.delete(ix)
       if (!initial || serverMap.has(ix) || attachResults.has(ix) || !this.channels.has(ix)) continue
       this.awaitedIxes.add(ix)
@@ -1713,7 +1714,7 @@ class ClientConnection implements MuxConnection {
     let hasNewChannels = false
 
     for (const [ix, entry] of this.channels) {
-      if (!reconcileIxes.has(ix)) {
+      if (!ixes.has(ix)) {
         // Registered after the RECONCILE we just got back was built — wait for next round.
         if (!serverMap.has(ix)) hasNewChannels = true
         continue
@@ -1770,8 +1771,8 @@ class ClientConnection implements MuxConnection {
 
   /** An awaited channel's own RECONCILED entry: `lastSeq` if the server attached it, null if not. */
   private handleAttachResult(ix: number, lastSeq: number | null): void {
-    if (this.reconcileIxes.has(ix)) {
-      this.earlyAttachResults.set(ix, lastSeq)
+    if (this.inFlight.ixes.has(ix)) {
+      this.inFlight.attachResults.set(ix, lastSeq)
       return
     }
     if (!this.awaitedIxes.delete(ix)) return
