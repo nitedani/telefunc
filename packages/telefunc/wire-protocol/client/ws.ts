@@ -74,18 +74,16 @@ class WsTransport implements UpgradeTarget {
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
-    let now = 0
-    const take = (frame: DecodedFrame, byteLength: number): boolean => {
+    const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) return budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)
       if (frame.tag === TAG.PONG) {
-        sender.heartbeat(frame.took, now)
+        sender.heartbeat(frame.took, at)
         onPong?.()
       } else onFrame?.(frame, byteLength)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
-      now = performance.now()
-      if (!receiveMessage(pieces, new Uint8Array(data as ArrayBuffer), now, take)) ws.close()
+      if (!receiveMessage(pieces, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
     }
     ws.onclose = () => {
       if (this.probed?.ws === ws) this.probed = null
@@ -240,20 +238,19 @@ class WsTransport implements UpgradeTarget {
       budget.sendHeld()
       this.onRoom(sender)
     }
-    let now = 0
-    const take = (frame: DecodedFrame, byteLength: number): boolean => {
+    const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
         if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return false
         this.onRoom(sender)
       } else if (frame.tag === TAG.PONG) {
-        sender.heartbeat(frame.took, now)
+        sender.heartbeat(frame.took, at)
         this.heartbeat?.resetPong()
         this.owner._onTransportPong(frame.ended)
       } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandonedWs)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
-      now = performance.now()
+      const now = performance.now()
       const raw = new Uint8Array(data as ArrayBuffer)
       this.heartbeat?.noteReceived(raw.byteLength, now)
       uplink.delivered(raw.byteLength, now)
@@ -363,13 +360,13 @@ class WsTransport implements UpgradeTarget {
 }
 
 /** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PagePieceReceiver` says,
- *  and hands `take` its frames, none for a piece before its frame's last. Returns false where its wire closes: for bytes
+ *  and hands `take` its frames, with `at`, none for a piece before its frame's last. Returns false where its wire closes: for bytes
  *  that close it, before `take` had any, or once `take` returned false. */
 function receiveMessage(
   pieces: PagePieceReceiver,
   raw: Uint8Array<ArrayBuffer>,
   at: number,
-  take: (frame: DecodedFrame, byteLength: number) => boolean,
+  take: (frame: DecodedFrame, byteLength: number, at: number) => boolean,
 ): boolean {
   // The frames before a message's last ride on it: each taken as it would be alone, but not dated apart from the last.
   let riding: { frames: Uint8Array<ArrayBuffer>[]; decoded: DecodedFrame[] } | undefined
@@ -403,6 +400,6 @@ function receiveMessage(
   }
   if (riding !== undefined)
     for (let i = 0; i < riding.frames.length; i++)
-      if (!take(riding.decoded[i]!, riding.frames[i]!.byteLength)) return false
-  return frame === null || take(frame, raw.byteLength)
+      if (!take(riding.decoded[i]!, riding.frames[i]!.byteLength, at)) return false
+  return frame === null || take(frame, raw.byteLength, at)
 }
