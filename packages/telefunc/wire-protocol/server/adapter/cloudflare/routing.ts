@@ -15,7 +15,6 @@ export {
 export type { CloudflareScale, LocationBucket, SessionRoutingTarget }
 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { TELEFUNC_SESSION_HEADER } from '../../../constants.js'
 import { assert, assertUsage } from '../../../../utils/assert.js'
 
 /**
@@ -35,6 +34,8 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** Internal: forwarded to the DO so it knows its own instance name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
+/** Internal: forwarded to the DO with the session token its client presented. */
+const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
