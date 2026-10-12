@@ -77,6 +77,7 @@ import { DeadlineScheduler } from './deadlineScheduler.js'
 import { SSELineSplitter } from './SSELineSplitter.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 import { Fifo } from '../../utils/Fifo.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 type BufferedFrame = {
   frame: Uint8Array<ArrayBuffer>
@@ -112,7 +113,7 @@ class Heartbeat {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
-  private lastReceivedAt = 0
+  private lastReceivedAt = DOUBLE_ZERO
   private readonly deliveries = new Deliveries()
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
   private expectedBy = () => 0

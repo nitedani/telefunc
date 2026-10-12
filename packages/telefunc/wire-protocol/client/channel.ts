@@ -51,6 +51,7 @@ import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -77,7 +78,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
-  private _closeDeadline = 0
+  private _closeDeadline = DOUBLE_ZERO
   private _closeWaiters: Array<() => void> = []
   private _didReceiveCloseAck = false
   private _expectCloseAck = false

@@ -421,7 +421,7 @@ function readU64(buf: Uint8Array, offset: number): number {
  *  (RFC 9000, appendix A.3). A seq reaches its receiver less than 2^31 frames from the next it expects: no wire or
  *  replay holds that many. */
 function seqNear(bits: number, expected: number): number {
-  const seq = expected - (expected % SEQ_SPAN) + bits
+  const seq = expected - (expected >>> 0) + bits
   if (seq <= expected - SEQ_SPAN / 2) return seq + SEQ_SPAN
   if (seq > expected + SEQ_SPAN / 2 && seq >= SEQ_SPAN) return seq - SEQ_SPAN
   return seq
@@ -430,7 +430,7 @@ function seqNear(bits: number, expected: number): number {
 /** A peer's acknowledgement of what this side sent: the latest seq with those low bits through `sent`, the last this
  *  side gave. A peer never lacks 2^32 frames of what was sent: no wire or replay holds that many. */
 function seqThrough(bits: number, sent: number): number {
-  const seq = sent - (sent % SEQ_SPAN) + bits
+  const seq = sent - (sent >>> 0) + bits
   return seq > sent && seq >= SEQ_SPAN ? seq - SEQ_SPAN : seq
 }
 

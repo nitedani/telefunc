@@ -5,6 +5,7 @@ import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -286,7 +287,7 @@ class ChannelMux {
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
-        lastReceivedAt: 0,
+        lastReceivedAt: DOUBLE_ZERO,
         deliveries: new Deliveries(),
         frameDelivery: 0,
         pongedAt: performance.now(),

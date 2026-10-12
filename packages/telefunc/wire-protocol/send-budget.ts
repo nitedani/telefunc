@@ -12,6 +12,7 @@ import type { Link } from './link.js'
 import { PieceSender } from './pieces.js'
 import { isSequencedTag } from './shared-ws.js'
 import { Fifo } from '../utils/Fifo.js'
+import { DOUBLE_ZERO } from '../utils/DOUBLE_ZERO.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 
 /** How much of the excess queue a round of acknowledgements sheds. */
@@ -49,17 +50,17 @@ class SendBudget {
    *  the sender handed, its bytes, what the uplink held ahead of it, and when. */
   private readonly sent = new Fifo<{ end: number; bytes: number; ahead: number; at: number }>()
   /** In ms, the server's clock from the first data an acknowledgement covered. */
-  private arrivedAt = 0
+  private arrivedAt = DOUBLE_ZERO
   /** The least one-way delay of data on the path, up to the offset between the clocks. */
   private leastDelay = Number.POSITIVE_INFINITY
   /** The least time an acknowledgement took back, up to the same offset, and how much longer the newest took: behind
    *  what the server sends, which a download fills, and no queue of the uplink's. Its wait falls no faster than time
    *  passes. */
   private leastBack = Number.POSITIVE_INFINITY
-  private lateMs = 0
-  private lateAt = 0
+  private lateMs = DOUBLE_ZERO
+  private lateAt = DOUBLE_ZERO
   private paceTimer: ReturnType<typeof setTimeout> | null = null
-  private paceDue = 0
+  private paceDue = DOUBLE_ZERO
   /** Called when the timer finds the uplink drained some of what it held. */
   onRoom: () => void = () => {}
 

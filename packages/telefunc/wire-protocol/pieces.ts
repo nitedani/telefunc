@@ -17,6 +17,7 @@ import {
 import { Link } from './link.js'
 import { TAG, assertProtocol, encode, isSequencedTag } from './shared-ws.js'
 import { Fifo } from '../utils/Fifo.js'
+import { DOUBLE_ZERO } from '../utils/DOUBLE_ZERO.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 
 /** Whether its receiver acknowledges a frame of this size. */
@@ -73,7 +74,7 @@ class PieceSender {
   /** The bytes the receiver has acknowledged; the first frame's, and when it was sent. */
   acknowledgedBytes = 0
   private firstBytes = 0
-  private firstAt = 0
+  private firstAt = DOUBLE_ZERO
   /** The bytes of the messages handed to the socket, headers and announcements included, as its receiver counts them. */
   transmittedBytes = 0
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
@@ -91,18 +92,18 @@ class PieceSender {
    *  of all it sent, and when it went; and when the newest acknowledgement came. */
   private lastAnnounced = 0
   private readonly announcedEnds = new Fifo<{ end: number; at: number }>()
-  private acknowledgedAt = 0
+  private acknowledgedAt = DOUBLE_ZERO
   /** Each announcement its receiver hasn't acknowledged: where its bytes start and end, of all it sent, and when. */
   private readonly announcements = new Fifo<{ start: number; end: number; at: number }>()
   /** In bytes per ms, the floor its newest ANNOUNCE named (see `Link.floor`). */
-  private namedFloor = 0
+  private namedFloor = DOUBLE_ZERO
   /** With no rate measured, a frame this size or smaller goes unannounced. */
-  private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES
+  private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES + DOUBLE_ZERO
   private pingInterval = 0
   /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
    *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, what a probe carries, or what the floor carries
    *  so where no room holds data back, if more. */
-  private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
+  private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES + DOUBLE_ZERO
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
   /** The frames the next message it sends carries (see `carry`), and once counted, their bytes. */
@@ -480,20 +481,20 @@ class PieceReceiver {
    *  the ANNOUNCE before any: when it arrived, its bytes, and in bytes per ms, the rate it came at; and the floor the
    *  opening ANNOUNCE named. */
   private announced: number | null = null
-  private announcedAt = 0
+  private announcedAt = DOUBLE_ZERO
   private lastAnnounced = 0
-  private rate = 0
-  private floor = 0
+  private rate = DOUBLE_ZERO
+  private floor = DOUBLE_ZERO
   /** The bytes of the messages it took in all, headers and announcements included, and when it last acknowledged. */
   took = 0
   private acknowledgedTook = 0
-  private newestAt = 0
+  private newestAt = DOUBLE_ZERO
   /** When the newest data frame arrived, and when the newest the last acknowledgement covered did. */
   private newestDataAt: number | null = null
   private acknowledgedDataAt: number | null = null
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
-  private ackDue = 0
+  private ackDue = DOUBLE_ZERO
   /** The acknowledgement the timer sends goes alone (see `acknowledgeIn`). */
   private ackAlone = false
 
