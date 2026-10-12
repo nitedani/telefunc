@@ -17,6 +17,10 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** How much of the excess queue a round of acknowledgements sheds. */
 const SHED_SHARE = 0.5
+/** The least allowance passes what the server takes before it acknowledges by this much at least. */
+const LEAST_OVER_SLACK_BYTES = 1024
+/** Parts of data handed within this long of one another make one sample. */
+const SAMPLE_MERGE_MS = 1
 
 /** Data handed to the socket at once: where it ends, of all the sender handed, its bytes, what the uplink held ahead of
  *  it, and when. */
@@ -143,15 +147,15 @@ class SendBudget {
     this.pace()
   }
 
-  /** Notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data handed within a
-   *  ms of one another make one sample, dated by the first. */
+  /** Notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data handed within
+   *  `SAMPLE_MERGE_MS` of one another make one sample, dated by the first. */
   private handed(bytes: number, data: boolean): void {
     const ahead = this.uplink.handed(bytes)
     if (!data) return
     const end = this.sender.transmittedBytes
     const at = performance.now()
     const last = this.sent.peekLast()
-    if (last !== undefined && at - last.at < 1) {
+    if (last !== undefined && at - last.at < SAMPLE_MERGE_MS) {
       last.bytes += bytes
       last.end = end
     } else this.sent.push({ end, bytes, ahead, at })
@@ -184,7 +188,10 @@ class SendBudget {
   private get least(): number {
     const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_SEND_AHEAD_MIN_BYTES
-    return Math.min(WIRE_SEND_AHEAD_MIN_BYTES, Math.max(this.slack + 1024, drainRate * WIRE_QUEUE_DELAY_MS))
+    return Math.min(
+      WIRE_SEND_AHEAD_MIN_BYTES,
+      Math.max(this.slack + LEAST_OVER_SLACK_BYTES, drainRate * WIRE_QUEUE_DELAY_MS),
+    )
   }
 
   /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most, and where less,
