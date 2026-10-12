@@ -30,6 +30,8 @@ import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/ad
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest } from './shared.js'
 
+/** A Durable Object takes a WebSocket message of 32 MiB at most. */
+const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
 const SHARD_TOKEN_TTL_SECONDS = 86400
 /** A session Durable Object writes its pin again once it's this old, well before KV lets it lapse. */
 const SHARD_TOKEN_REPIN_MS = (SHARD_TOKEN_TTL_SECONDS * 1000) / 2
@@ -70,8 +72,7 @@ class Telefunc {
 
 function telefunc(options?: CloudflareOptions): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
-  // workerd closes a WebSocket that receives a larger message (1009).
-  setAdapterMaxFrameBytes(32 * 1024 * 1024)
+  setAdapterMaxFrameBytes(DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
