@@ -39,7 +39,7 @@ import {
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
-import { PieceReceiver, PieceSender } from '../pieces.js'
+import { PieceReceiver, PieceSender, carriedAckBytes } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -1941,12 +1941,15 @@ class WsTransport implements UpgradeTarget {
       const now = performance.now()
       const message = receiveMessage(ws, pieces, data, now)
       if (message === null) return
-      if (message.frame.tag === TAG.PONG) {
-        sender.heartbeat(message.frame.took, now)
+      const { ack, frame } = message
+      if (ack !== null && !budget.acknowledged(ack.bytes, ack.heldMs, ack.spanUs)) return ws.close()
+      if (frame === null) return
+      if (frame.tag === TAG.PONG) {
+        sender.heartbeat(frame.took, now)
         onPong?.()
         return
       }
-      onFrame?.(message.frame, message.byteLength)
+      onFrame?.(frame, message.byteLength)
     }
     ws.onclose = () => {
       if (this.probed?.ws === ws) this.probed = null
@@ -2094,7 +2097,11 @@ class WsTransport implements UpgradeTarget {
     return {
       link,
       budget,
-      pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), { peerHoldsBack: false, link }),
+      pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), {
+        peerHoldsBack: false,
+        link,
+        carry: (ack) => sender.carry(ack),
+      }),
     }
   }
 
@@ -2116,12 +2123,12 @@ class WsTransport implements UpgradeTarget {
       budget.received()
       const message = receiveMessage(ws, pieces, data, now)
       if (message === null) return
-      const { frame } = message
-      if (frame.tag === TAG.PIECES_ACK) {
-        if (budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) this.onRoom(sender)
-        else ws.close()
-        return
+      const { ack, frame } = message
+      if (ack !== null) {
+        if (!budget.acknowledged(ack.bytes, ack.heldMs, ack.spanUs)) return ws.close()
+        this.onRoom(sender)
       }
+      if (frame === null) return
       if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, now)
         this.heartbeat?.resetPong()
@@ -2228,28 +2235,38 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frame a WebSocket message that arrived at `at` completes, or null: a piece before its frame's last, or bytes that
- *  close `ws`. Its receiver acknowledges it as `PieceReceiver` says. */
+type PiecesAckFrame = Extract<DecodedFrame, { tag: typeof TAG.PIECES_ACK }>
+
+/** What a WebSocket message that arrived at `at` carries: a PIECES_ACK, and the frame it completes, null for a piece
+ *  before its frame's last; or null for bytes that close `ws`. Its receiver acknowledges it as `PieceReceiver` says. */
 function receiveMessage(
   ws: WebSocket,
   pieces: PieceReceiver,
   data: unknown,
   at: number,
-): { frame: DecodedFrame; byteLength: number } | null {
+): { ack: PiecesAckFrame | null; frame: DecodedFrame | null; byteLength: number } | null {
   try {
     let raw = new Uint8Array(data as ArrayBuffer)
+    let ack: PiecesAckFrame | null = null
+    const carried = carriedAckBytes(raw)
+    if (carried > 0) {
+      ack = decode(raw.subarray(0, carried)) as PiecesAckFrame
+      pieces.tookCarried(carried)
+      raw = raw.subarray(carried)
+    }
     let frame = decode(raw)
     if (frame.tag === TAG.ANNOUNCE) {
       pieces.announce(frame.bytes, at, frame.floor)
-      return null
+      return { ack, frame: null, byteLength: raw.byteLength }
     }
     if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece, at)
-      if (whole === null) return null
+      if (whole === null) return { ack, frame: null, byteLength: raw.byteLength }
       raw = whole
       frame = decode(raw)
     } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
-    return { frame, byteLength: raw.byteLength }
+    if (frame.tag === TAG.PIECES_ACK) return { ack: frame, frame: null, byteLength: raw.byteLength }
+    return { ack, frame, byteLength: raw.byteLength }
   } catch {
     ws.close()
     return null

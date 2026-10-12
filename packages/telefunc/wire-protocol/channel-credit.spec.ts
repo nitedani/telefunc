@@ -214,8 +214,9 @@ const piecesOf = (socket: LoopbackSocket) =>
     }
   ).connectionEntries.get(socket)?.state.pieces
 
-/** The bytes a PIECE adds to its piece. */
+/** The bytes a PIECE adds to its piece, and a PIECES_ACK's. */
 const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
+const PIECES_ACK_BYTES = encode.piecesAck(0, 0, 0).byteLength
 
 /** What the server holds for the page on `socket`: what the wire carries, and what waits for a probe. */
 const serverHolds = (socket: LoopbackSocket) =>
@@ -1234,6 +1235,24 @@ test.each([16, 64, 256])(
     expect(rtts.filter((ms) => ms > 2 * LATENCY_MS + 1)).toEqual([])
   },
 )
+
+test("the server acknowledges a page's message in the message of its answer", async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  server.listenBinary(() => 'ok')
+  await run(100)
+  const echo = async () => {
+    let answered = false
+    void page.sendBinary(new Uint8Array(8 * KIB), { ack: true }).then(() => (answered = true))
+    while (!answered) await run(1)
+  }
+  // The fresh wire's first message goes announced, which the server acknowledges at once.
+  await echo()
+  const before = loop.sent.server.length
+  for (let i = 0; i < 10; i++) await echo()
+  const acks = loop.sent.server.slice(before).filter(([tag]) => tag === TAG.PIECES_ACK || tag === TAG.ACK_RES)
+  // A message that starts with a PIECES_ACK and is longer carries the answer behind it.
+  expect(acks.map(([tag, , bytes]) => [tag, bytes > PIECES_ACK_BYTES])).toEqual(Array(10).fill([TAG.PIECES_ACK, true]))
+})
 
 test('a fresh wire carrying only small messages stops announcing them once one announcement was acknowledged, either way', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()

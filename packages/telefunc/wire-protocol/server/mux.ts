@@ -45,7 +45,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceReceiver, PieceSender } from '../pieces.js'
+import { PieceReceiver, PieceSender, carriedAckBytes } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from '../link.js'
 import type { ServerChannel } from './channel.js'
@@ -276,6 +276,12 @@ class ChannelMux {
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     const wait = new SocketWait(() => this.bufferedAmount(connection))
+    const sender = transport.wholeMessages
+      ? new PieceSender(
+          (message) => transport.sendNow(connection, message),
+          () => transport.bufferedAmount(connection) ?? 0,
+        )
+      : null
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -283,15 +289,13 @@ class ChannelMux {
         deliveries: new Deliveries(),
         frameDelivery: 0,
         pongedAt: performance.now(),
-        pieces: transport.wholeMessages
-          ? {
-              sender: new PieceSender(
-                (message) => transport.sendNow(connection, message),
-                () => transport.bufferedAmount(connection) ?? 0,
-              ),
-              receiver: new PieceReceiver((frame) => this.send(connection, frame), { peerHoldsBack: true }),
-            }
-          : null,
+        pieces: sender && {
+          sender,
+          receiver: new PieceReceiver((frame) => this.send(connection, frame), {
+            peerHoldsBack: true,
+            carry: (ack) => sender.carry(ack),
+          }),
+        },
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -398,7 +402,29 @@ class ChannelMux {
   private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
+    const carried = carriedAckBytes(rawFrame)
+    if (carried > 0) {
+      if (!this.takeCarriedAck(entry, connection, rawFrame.subarray(0, carried))) return Promise.resolve(null)
+      rawFrame = rawFrame.subarray(carried)
+    }
     return this.dispatchFrame(entry, connection, rawFrame, false)
+  }
+
+  /** Takes the PIECES_ACK a message carried ahead of its frame. Returns false if it terminated the wire for it. */
+  private takeCarriedAck(entry: ConnectionEntry, connection: Wire, raw: Uint8Array<ArrayBuffer>): boolean {
+    try {
+      const ack = decodeClientFrame(raw, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+      assert(ack.tag === TAG.PIECES_ACK)
+      const { pieces } = entry.state
+      assertProtocol(pieces, 'PIECES_ACK on a wire that takes no pieces')
+      pieces.receiver.tookCarried(raw.byteLength)
+      assertProtocol(pieces.sender.acknowledged(ack.bytes, ack.heldMs, ack.spanUs), 'PIECES_ACK for nothing sent')
+      return true
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(connection)
+      return false
+    }
   }
 
   /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
