@@ -416,6 +416,7 @@ class PieceSender {
 
   /** Counts the frames carried, ahead of what is sent next, which hands them to the socket. */
   private takeCarried(): void {
+    if (this.carried.length === 0) return
     for (const take of this.carried.splice(0)) {
       const frame = take()
       if (frame === null) continue
