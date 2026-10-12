@@ -971,8 +971,9 @@ class ClientConnection implements MuxConnection {
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
     if (isSequencedFrame(frame)) {
-      frame.seq = seqNear(frame.seq, (this.lastSeqByChannel.get(frame.index) ?? 0) + 1)
-      if (this.trackSeq(frame.index, frame.seq) === 'dup') return
+      const seq = this.trackSeq(frame.index, frame.seq)
+      if (seq === null) return
+      frame.seq = seq
     }
     if (frame.tag === TAG.WINDOW) this.serverHasThrough(frame.index, this.sentThrough(frame.index, frame.lastSeq))
     if (frame.tag === TAG.ACK_RES) this.serverHasThrough(frame.index, frame.ackedSeq)
@@ -1824,15 +1825,16 @@ class ClientConnection implements MuxConnection {
     this.dispose()
   }
 
-  /** Dedup against double-delivery. Transports are TCP-ordered and replay sends a contiguous slice
-   *  starting at our reported `lastSeq + 1`, so duplicates shouldn't occur in normal operation. One for a channel the
-   *  page let go is dropped too. */
-  private trackSeq(ix: number, seq: number): 'accept' | 'dup' {
-    if (!this.channels.has(ix)) return 'dup'
+  /** The seq of a frame of channel `ix` whose seq has the low bits `bits`, or null to drop it. Dedup against
+   *  double-delivery. Transports are TCP-ordered and replay sends a contiguous slice starting at our reported
+   *  `lastSeq + 1`, so duplicates shouldn't occur in normal operation. One for a channel the page let go is dropped too. */
+  private trackSeq(ix: number, bits: number): number | null {
+    if (!this.channels.has(ix)) return null
     const prev = this.lastSeqByChannel.get(ix) ?? 0
-    if (seq <= prev) return 'dup'
+    const seq = seqNear(bits, prev + 1)
+    if (seq <= prev) return null
     this.lastSeqByChannel.set(ix, seq)
-    return 'accept'
+    return seq
   }
 
   /** Takes out what the channels `releasable` accepts queued, storing what replays in their replays. Once the room is
@@ -1956,16 +1958,18 @@ class WsTransport implements UpgradeTarget {
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
+    let now = 0
+    const take = (frame: DecodedFrame, byteLength: number): boolean => {
+      if (frame.tag === TAG.PIECES_ACK) return budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)
+      if (frame.tag === TAG.PONG) {
+        sender.heartbeat(frame.took, now)
+        onPong?.()
+      } else onFrame?.(frame, byteLength)
+      return true
+    }
     ws.onmessage = ({ data }: MessageEvent) => {
-      const now = performance.now()
-      for (const { frame, byteLength } of receiveMessage(ws, pieces, data, now) ?? []) {
-        if (frame.tag === TAG.PIECES_ACK) {
-          if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return ws.close()
-        } else if (frame.tag === TAG.PONG) {
-          sender.heartbeat(frame.took, now)
-          onPong?.()
-        } else onFrame?.(frame, byteLength)
-      }
+      now = performance.now()
+      if (!receiveMessage(pieces, new Uint8Array(data as ArrayBuffer), now, take)) ws.close()
     }
     ws.onclose = () => {
       if (this.probed?.ws === ws) this.probed = null
@@ -2132,21 +2136,25 @@ class WsTransport implements UpgradeTarget {
       budget.sendHeld()
       this.onRoom(sender)
     }
+    let now = 0
+    const take = (frame: DecodedFrame, byteLength: number): boolean => {
+      if (frame.tag === TAG.PIECES_ACK) {
+        if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return false
+        this.onRoom(sender)
+      } else if (frame.tag === TAG.PONG) {
+        sender.heartbeat(frame.took, now)
+        this.heartbeat?.resetPong()
+        this.owner._onTransportPong(frame.ended)
+      } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandonedWs)
+      return true
+    }
     ws.onmessage = ({ data }: MessageEvent) => {
-      const now = performance.now()
-      this.heartbeat?.noteReceived((data as ArrayBuffer).byteLength, now)
-      link.delivered((data as ArrayBuffer).byteLength, now)
+      now = performance.now()
+      const raw = new Uint8Array(data as ArrayBuffer)
+      this.heartbeat?.noteReceived(raw.byteLength, now)
+      link.delivered(raw.byteLength, now)
       budget.received()
-      for (const { frame, byteLength } of receiveMessage(ws, pieces, data, now) ?? []) {
-        if (frame.tag === TAG.PIECES_ACK) {
-          if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return ws.close()
-          this.onRoom(sender)
-        } else if (frame.tag === TAG.PONG) {
-          sender.heartbeat(frame.took, now)
-          this.heartbeat?.resetPong()
-          this.owner._onTransportPong(frame.ended)
-        } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandonedWs)
-      }
+      if (!receiveMessage(pieces, raw, now, take)) ws.close()
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -2247,40 +2255,40 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frames a WebSocket message that arrived at `at` carries, those it carried ahead of its own first, none for a
- *  piece before its frame's last; or null for bytes that close `ws`. Its receiver acknowledges it as `PieceReceiver`
- *  says. */
+/** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PieceReceiver` says, and
+ *  hands `take` the frames it carried ahead of its own, then its own, none for a piece before its frame's last. Returns
+ *  false where its wire closes: for bytes that close it, before `take` had any, or once `take` returned false. */
 function receiveMessage(
-  ws: WebSocket,
   pieces: PieceReceiver,
-  data: unknown,
+  raw: Uint8Array<ArrayBuffer>,
   at: number,
-): { frame: DecodedFrame; byteLength: number }[] | null {
+  take: (frame: DecodedFrame, byteLength: number) => boolean,
+): boolean {
+  let carried: { frame: DecodedFrame; byteLength: number }[] | undefined
+  let frame: DecodedFrame | null
   try {
-    let raw = new Uint8Array(data as ArrayBuffer)
-    const frames: { frame: DecodedFrame; byteLength: number }[] = []
-    for (let carried = carriedBytes(raw); carried > 0; carried = carriedBytes(raw)) {
-      frames.push({ frame: decode(raw.subarray(0, carried)), byteLength: carried })
-      pieces.tookCarried(carried)
-      raw = raw.subarray(carried)
+    for (let bytes = carriedBytes(raw); bytes > 0; bytes = carriedBytes(raw)) {
+      ;(carried ??= []).push({ frame: decode(raw.subarray(0, bytes)), byteLength: bytes })
+      pieces.tookCarried(bytes)
+      raw = raw.subarray(bytes)
     }
-    let frame = decode(raw)
+    frame = decode(raw)
     if (frame.tag === TAG.ANNOUNCE) {
       pieces.announce(frame.bytes, at, frame.floor)
-      return frames
-    }
-    if (frame.tag === TAG.PIECE) {
+      frame = null
+    } else if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece, at)
-      if (whole === null) return frames
-      raw = whole
-      frame = decode(raw)
+      frame = null
+      if (whole !== null) {
+        raw = whole
+        frame = decode(raw)
+      }
     } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
-    frames.push({ frame, byteLength: raw.byteLength })
-    return frames
   } catch {
-    ws.close()
-    return null
+    return false
   }
+  if (carried !== undefined) for (const c of carried) if (!take(c.frame, c.byteLength)) return false
+  return frame === null || take(frame, raw.byteLength)
 }
 
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
