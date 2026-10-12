@@ -4,6 +4,7 @@ export type { SendRoom }
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
   WIRE_ANNOUNCED_WAIT_MARGIN,
+  WIRE_ARENA_BYTES,
   WIRE_GATHER_BYTES,
   WIRE_PIECES_ACK_BYTES,
   WIRE_PIECE_RATE_MARGIN,
@@ -16,7 +17,7 @@ import {
   WIRE_SEND_ACK_MS,
 } from './constants.js'
 import { Link } from './link.js'
-import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag } from './shared-ws.js'
+import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, follows, isSequencedTag } from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
 import { DOUBLE_ZERO } from '../utils/DOUBLE_ZERO.js'
@@ -112,7 +113,12 @@ class PieceSender {
   private lastVaries = false
   private gatheredSent = false
   private gatheredAtOnce = false
+  /** Its frames were taken back to back from one buffer: they go where they are (see `encode.inPlace`). */
+  private gatheredInPlace = false
   private flushQueued = false
+  /** What the messages of several frames are written in, and where the next starts (see `WIRE_ARENA_BYTES`). */
+  private arena = new Uint8Array(0)
+  private arenaAt = 0
 
   constructor(
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
@@ -196,7 +202,8 @@ class PieceSender {
    *  What was carried rides on it. */
   private gather(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
     const bytes = frame.byteLength
-    const length = this.lastVaries ? LENGTH_BYTES : 0
+    // The LENGTH the frame before it needs now, and in a message written in place, the one ahead of its last.
+    const length = (this.lastVaries ? LENGTH_BYTES : 0) + (this.gatheredInPlace ? LENGTH_BYTES : 0)
     if (
       this.gatheredSent &&
       ((data && (this.gatheredAtOnce || this.room !== UNBOUNDED)) ||
@@ -220,6 +227,8 @@ class PieceSender {
   }
 
   private add(frame: Uint8Array<ArrayBuffer>): void {
+    const n = this.gathered.length
+    this.gatheredInPlace = (n === 0 || this.gatheredInPlace) && follows(frame, this.gathered[n - 1])
     this.gathered.push(frame)
     this.gatheredBytes += frame.byteLength
     this.lastVaries = fixedBytes(frame[0]!) === 0
@@ -255,12 +264,32 @@ class PieceSender {
   flush(): void {
     const n = this.gathered.length
     if (n === 0) return
-    const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
+    let message: Uint8Array<ArrayBuffer>
+    if (n === 1) message = this.gathered[0]!
+    else if (this.gatheredInPlace) {
+      message = encode.inPlace(this.gathered)
+      // Its last frame has a LENGTH ahead of it too.
+      this.transmitted(LENGTH_BYTES, false)
+    } else message = encode.message(this.gathered, this.gatheredBytes, this.carve())
     this.gathered.length = 0
     this.gatheredBytes = 0
-    this.lastVaries = this.gatheredSent = this.gatheredAtOnce = false
+    this.lastVaries = this.gatheredSent = this.gatheredAtOnce = this.gatheredInPlace = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
+  }
+
+  /** The next `gatheredBytes` of the arena, in a new one where they don't fit; a message larger than an arena has its
+   *  own. */
+  private carve(): Uint8Array<ArrayBuffer> {
+    const bytes = this.gatheredBytes
+    if (bytes > WIRE_ARENA_BYTES) return new Uint8Array(bytes)
+    if (this.arenaAt + bytes > this.arena.byteLength) {
+      this.arena = new Uint8Array(WIRE_ARENA_BYTES)
+      this.arenaAt = 0
+    }
+    const at = this.arenaAt
+    this.arenaAt += bytes
+    return this.arena.subarray(at, this.arenaAt)
   }
 
   /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes, and holds the rest. */

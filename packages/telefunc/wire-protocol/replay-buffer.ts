@@ -1,4 +1,12 @@
-import { payloadBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
+import { WIRE_ARENA_BYTES } from './constants.js'
+import {
+  LENGTH_BYTES,
+  frameBuffer,
+  payloadBytes,
+  replayLaneOf,
+  type FrameSpace,
+  type ReplayLaneKind,
+} from './shared-ws.js'
 
 /**
  * High-performance replay buffer for outgoing WebSocket data frames.
@@ -15,8 +23,11 @@ import { payloadBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
  * all it lacks, or null if a dropped frame is among it.
  *
  * Requires non-decreasing seq values.
+ *
+ * The frames it will hold are written in its buffer (see `take`), which it lets go of once it holds nothing: they leave
+ * it in the order they came, so a buffer outlives its frames by at most what was taken after them.
  */
-export class ReplayBuffer {
+export class ReplayBuffer implements FrameSpace {
   private readonly lanes: Record<ReplayLaneKind, ReplayLane>
   private readonly allLanes: readonly ReplayLane[]
   private _seq = 0
@@ -26,6 +37,12 @@ export class ReplayBuffer {
   private acknowledgedSeq = 0
   /** Lower budgets than the lanes', which apply once the peer acknowledged every seq through `throughSeq`. */
   private lowered: { budgets: Record<ReplayLaneKind, number>; throughSeq: number } | null = null
+  /** The buffer frames are taken from, the bytes of it taken, and the last take's; the bytes taken since it last held
+   *  nothing. */
+  private space = new Uint8Array(0)
+  private spaceAt = 0
+  private lastTake = 0
+  private run = 0
 
   /** Current sequence number. */
   get seq(): number {
@@ -56,6 +73,28 @@ export class ReplayBuffer {
     this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this._seq } : null
   }
 
+  /** The next `bytes` for a frame it will hold, with room ahead of them for a LENGTH. A new buffer holds as much as was
+   *  taken since it last held nothing, `WIRE_ARENA_BYTES` at most: the one it lets go of unfilled is no larger than
+   *  what it took. */
+  take(bytes: number): Uint8Array<ArrayBuffer> {
+    const need = LENGTH_BYTES + bytes
+    if (this.spaceAt + need > this.space.byteLength) {
+      this.space = frameBuffer(Math.max(need, Math.min(WIRE_ARENA_BYTES, this.run)))
+      this.spaceAt = 0
+    }
+    const at = this.spaceAt + LENGTH_BYTES
+    this.spaceAt += need
+    this.lastTake = need
+    this.run += need
+    return this.space.subarray(at, this.spaceAt)
+  }
+
+  takeBack(): void {
+    this.spaceAt -= this.lastTake
+    this.run -= this.lastTake
+    this.lastTake = 0
+  }
+
   /** Increment and return the next sequence number. */
   nextSeq(): number {
     return ++this._seq
@@ -74,6 +113,7 @@ export class ReplayBuffer {
   acknowledge(lastSeq: number): void {
     if (lastSeq > this.acknowledgedSeq) this.acknowledgedSeq = lastSeq
     for (const lane of this.allLanes) lane.acknowledge(lastSeq)
+    if (this.length === 0) this.letGo()
     if (this.lowered === null || lastSeq < this.lowered.throughSeq) return
     const { budgets } = this.lowered
     this.lowered = null
@@ -103,6 +143,7 @@ export class ReplayBuffer {
 
   dispose(): void {
     for (const lane of this.allLanes) lane.dispose()
+    this.letGo()
     this._seq = 0
     this.pushedSeq = 0
     this.acknowledgedSeq = 0
@@ -110,6 +151,13 @@ export class ReplayBuffer {
   }
 
   // ── Private ──
+
+  /** It holds nothing: the next frame starts a buffer. */
+  private letGo(): void {
+    this.space = new Uint8Array(0)
+    this.spaceAt = 0
+    this.run = 0
+  }
 
   private pushed(seq: number): void {
     if (seq > this._seq) this._seq = seq

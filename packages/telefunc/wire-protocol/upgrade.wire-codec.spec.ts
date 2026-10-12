@@ -15,6 +15,7 @@ import {
   isOneFrame,
   messageFrames,
   type BarrierPayload,
+  type FrameSpace,
   type ReconcilePayload,
   type ReconciledPayload,
   seqNear,
@@ -281,6 +282,25 @@ describe('several frames in one WebSocket message', () => {
     expect(isOneFrame(message)).toBe(false)
     expect(messageFrames(message)).toEqual(frames)
     expect(frames.map(isOneFrame)).toEqual([true, true, true, true])
+  })
+
+  test('hold them where their sender wrote them back to back, a LENGTH ahead of each, the last too', () => {
+    const buffer = new Uint8Array(64)
+    let at = 0
+    let last = 0
+    const space: FrameSpace = {
+      take: (bytes) => buffer.subarray((at += last = LENGTH_BYTES + bytes) - bytes, at),
+      takeBack: () => void (at -= last),
+    }
+    const frames = [
+      encode.text(1, 'a', 4, space),
+      encode.binary(2, new Uint8Array(3), 5, space),
+      encode.text(1, 'é', 6, space),
+    ]
+    const message = encode.inPlace(frames)
+    expect(message.buffer).toBe(buffer.buffer)
+    expect(message.byteLength).toBe(at)
+    expect(messageFrames(message)).toEqual(frames)
   })
 
   const malformed: [string, Uint8Array<ArrayBuffer>][] = [

@@ -31,7 +31,7 @@ class IndexedPeer {
   /** Returns the frame's payload byte count (the caller's flow-control unit). */
   sendText(data: string): number {
     const seq = this.replay.nextSeq()
-    const frame = encode.text(this.index, data, seq)
+    const frame = encode.text(this.index, data, seq, this.replay)
     this.sender.send(frame, () => this.replay.push(seq, frame))
     return payloadBytes(frame)
   }
@@ -39,21 +39,21 @@ class IndexedPeer {
   /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
   sendTextAckReq(data: string, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
-    const frame = encode.textAckReq(this.index, data, seq)
+    const frame = encode.textAckReq(this.index, data, seq, this.replay)
     onQueued(seq, payloadBytes(frame))
     this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   sendBinary(data: Uint8Array): void {
     const seq = this.replay.nextSeq()
-    const frame = encode.binary(this.index, data, seq)
+    const frame = encode.binary(this.index, data, seq, this.replay)
     this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
   sendBinaryAckReq(data: Uint8Array, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
-    const frame = encode.binaryAckReq(this.index, data, seq)
+    const frame = encode.binaryAckReq(this.index, data, seq, this.replay)
     onQueued(seq, data.byteLength)
     this.sender.send(frame, () => this.replay.push(seq, frame))
   }
@@ -62,7 +62,7 @@ class IndexedPeer {
    *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
   sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const seq = this.replay.nextSeq()
-    this.sendSequenced(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
+    this.sendSequenced(seq, encode.ackRes(this.index, seq, ackedSeq, result, status, this.replay))
   }
 
   /** Returns its seq. */
@@ -110,7 +110,7 @@ class IndexedPeer {
   /** Returns the frame's payload byte count. */
   sendPublish(data: string): number {
     const seq = this.replay.nextSeq()
-    const frame = encode.publish(this.index, data, seq)
+    const frame = encode.publish(this.index, data, seq, this.replay)
     this.sendSequenced(seq, frame)
     return payloadBytes(frame)
   }
@@ -118,7 +118,7 @@ class IndexedPeer {
   /** Returns the frame's payload byte count. */
   sendPublishBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
-    const frame = encode.publishBinary(this.index, data, seq)
+    const frame = encode.publishBinary(this.index, data, seq, this.replay)
     this.sendSequenced(seq, frame)
     return payloadBytes(frame)
   }

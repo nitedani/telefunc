@@ -50,11 +50,9 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../reque
 import {
   ACK_STATUS,
   ERROR_REASON,
-  LENGTH_BYTES,
   TAG,
   decode,
   encode,
-  fixedBytes,
   isOneFrame,
   messageFrames,
   isSequencedFrame,
@@ -68,6 +66,7 @@ import type {
   AckResultStatus,
   ChannelFrame,
   DecodedFrame,
+  FrameSpace,
   PingEntry,
   PongEntry,
   ReadyPayload,
@@ -746,28 +745,28 @@ class ClientConnection implements MuxConnection {
   }
 
   send(channel: MuxChannel, data: string): number {
-    const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
+    const frame = this.sendSequenced(channel, 'data', (ix, seq, space) => encode.text(ix, data, seq, space))
     return frame ? payloadBytes(frame) : 0
   }
 
   sendBinary(channel: MuxChannel, data: Uint8Array): void {
-    this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
+    this.sendSequenced(channel, 'data', (ix, seq, space) => encode.binary(ix, data, seq, space))
   }
 
   sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
+    this.sendSequenced(channel, 'ack', (ix, seq, space) => encode.publishAckReq(ix, data, seq, space), onQueued)
   }
 
   sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
+    this.sendSequenced(channel, 'ack', (ix, seq, space) => encode.publishBinaryAckReq(ix, data, seq, space), onQueued)
   }
 
   sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
+    this.sendSequenced(channel, 'ack', (ix, seq, space) => encode.textAckReq(ix, data, seq, space), onQueued)
   }
 
   sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
+    this.sendSequenced(channel, 'ack', (ix, seq, space) => encode.binaryAckReq(ix, data, seq, space), onQueued)
   }
 
   /** Encodes at the seq it then takes, so a frame the server would refuse throws and takes none. `onQueued(seq)` runs
@@ -775,13 +774,13 @@ class ClientConnection implements MuxConnection {
   private sendSequenced(
     channel: MuxChannel,
     kind: 'data' | 'ack',
-    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
+    buildFrame: (ix: number, seq: number, space: FrameSpace) => Uint8Array<ArrayBuffer>,
     onQueued?: (seq: number) => void,
   ): Uint8Array<ArrayBuffer> | undefined {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
-    const frame = buildFrame(ix, replay.seq + 1)
+    const frame = buildFrame(ix, replay.seq + 1, replay)
     // The server ends the wire a larger frame arrives on, and the one its replay arrives on next.
     assertUsage(
       frame.byteLength <= channel._maxFrameBytes,
@@ -2277,12 +2276,14 @@ function receiveMessage(
   try {
     if (!isOneFrame(raw)) {
       const frames = messageFrames(raw)
+      let lengths = raw.byteLength
+      for (const each of frames) lengths -= each.byteLength
+      pieces.tookLength(lengths)
       raw = frames.pop()!
       riding = { frames, decoded: [] }
       for (const each of frames) {
         const decoded = decode(each)
         pieces.arrived(each.byteLength, isSequencedTag(decoded.tag), at, true)
-        if (fixedBytes(decoded.tag) === 0) pieces.tookLength(LENGTH_BYTES)
         riding.decoded.push(decoded)
       }
     }
