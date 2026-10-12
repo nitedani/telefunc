@@ -567,8 +567,11 @@ class ClientConnection implements MuxConnection {
     )
     // Every RECONCILE lists every channel, the closed ones too, so the oldest closed one makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
-      const [ix, entry] = [...this.channels].find(([, entry]) => entry.state.tag === 'closed')!
-      this.releaseChannel(ix, entry.channel)
+      for (const [ix, entry] of this.channels) {
+        if (entry.state.tag !== 'closed') continue
+        this.releaseChannel(ix, entry.channel)
+        break
+      }
     }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
@@ -1450,10 +1453,8 @@ class ClientConnection implements MuxConnection {
       uplink: this.transport.uplink,
       batched: this.transport.batched,
     })
-    const reconcile: ReconcilePayload = {
-      open,
-      ...(this.sessionId ? { sessionId: this.sessionId } : {}),
-    }
+    const reconcile: ReconcilePayload = { open }
+    if (this.sessionId) reconcile.sessionId = this.sessionId
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
@@ -1520,13 +1521,18 @@ class ClientConnection implements MuxConnection {
     // replay buffers. Every other reconcile is on a live wire: a first attempt has sent nothing yet, and a
     // reconcile on an established wire (new-channel registration, chained reconcile) has no
     // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
-    const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
-    if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
+    if (isInitialBatch && (this.sessionId !== null || this.sentBefore())) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     for (const { channelIx, seq } of this.settleQueue())
       if (seq !== undefined && this.isSendable(channelIx) && !this.inFlight.carriedFrom.has(channelIx))
         this.inFlight.carriedFrom.set(channelIx, seq)
     return this.drainBufferedFrames(this.isSendable)
+  }
+
+  /** Whether a replay holds a frame the page sent. */
+  private sentBefore(): boolean {
+    for (const replay of this.replayBuffers.values()) if (replay.length > 0) return true
+    return false
   }
 
   private readonly isSendable = (ix: number): boolean => !this.awaitedIxes.has(ix)

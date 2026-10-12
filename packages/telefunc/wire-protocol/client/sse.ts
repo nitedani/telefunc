@@ -333,7 +333,7 @@ class SseTransport implements UpgradeSource {
         uploadAbort.abort()
         this.streamRequest = { tag: 'failed' }
         if (unsent) {
-          this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+          this.outbox = unsent.map((frame) => ({ frame, deadline: Date.now() })).concat(this.outbox)
           for (const frame of unsent) this.outboxBytes += frame.byteLength
         }
         this.owner._onTransportBatched(this)
