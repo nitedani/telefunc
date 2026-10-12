@@ -756,25 +756,25 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const frame = encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0)
-    this.sendFlowControl(ix, frame, urgent ? 'urgent-flow-control' : withNext ? 'acknowledgement' : 'flow-control')
+    this.sendUnsequenced(ix, frame, urgent ? 'urgent-flow-control' : withNext ? 'acknowledgement' : 'flow-control')
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.msgWindow(ix, limit), urgent ? 'urgent-flow-control' : 'flow-control')
+    this.sendUnsequenced(ix, encode.msgWindow(ix, limit), urgent ? 'urgent-flow-control' : 'flow-control')
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.bdpPing(ix, probe))
+    this.sendUnsequenced(ix, encode.bdpPing(ix, probe), 'flow-control')
   }
 
   sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, backlog, pathRtt))
+    this.sendUnsequenced(ix, encode.bdpPingAck(ix, probe, backlog, pathRtt), 'flow-control')
   }
 
   bufferedAmount(): number {
@@ -792,11 +792,8 @@ class ClientConnection implements MuxConnection {
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
    *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
    *  to advertise it again. */
-  private sendFlowControl(
-    ix: number,
-    frame: Uint8Array<ArrayBuffer>,
-    kind: 'flow-control' | 'urgent-flow-control' | 'acknowledgement' = 'flow-control',
-  ): void {
+  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait. */
+  private sendUnsequenced(ix: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
       this.queued().push({ frame, channelIx: ix, seq: undefined })
       return
@@ -807,23 +804,13 @@ class ClientConnection implements MuxConnection {
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.broadcastSub(ix, binary)
-    if (!this.canSendImmediately(ix)) {
-      this.queued().push({ frame, channelIx: ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind: 'control', frame })
+    this.sendUnsequenced(ix, encode.broadcastSub(ix, binary), 'control')
   }
 
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.broadcastUnsub(ix, binary)
-    if (!this.canSendImmediately(ix)) {
-      this.queued().push({ frame, channelIx: ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind: 'control', frame })
+    this.sendUnsequenced(ix, encode.broadcastUnsub(ix, binary), 'control')
   }
 
   _onTransportOpen(transport: ClientChannelTransport): void {
