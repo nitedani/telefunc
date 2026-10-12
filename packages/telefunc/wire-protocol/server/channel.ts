@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reconnectWindow }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
 export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 
@@ -37,7 +37,7 @@ import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { Listeners } from '../../utils/Listeners.js'
 import {
@@ -1022,12 +1022,6 @@ function rejectOverflow(): Promise<never> {
 
 function reportServerChannelError(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
-}
-
-/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
-function reconnectWindow(): number {
-  const c = getServerConfig().channel
-  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
