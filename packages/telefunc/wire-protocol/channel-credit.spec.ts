@@ -1194,6 +1194,24 @@ test('a push of 4 KiB messages on a fresh wire whose floor carries them within a
   expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE || tag === TAG.ANNOUNCE)).toEqual([])
 })
 
+test.each([16, 64, 256])(
+  'a page that sends %i KiB messages, each once the answer to the one before arrived, gets each answer a round trip after it sends it',
+  async (kib) => {
+    const { server, page } = loop.open<Uint8Array, Uint8Array>()
+    server.listenBinary(() => 'ok')
+    await run(100)
+    const rtts: number[] = []
+    for (let i = 0; i < 10; i++) {
+      const at = Date.now()
+      let answered = false
+      void page.sendBinary(new Uint8Array(kib * KIB), { ack: true }).then(() => (answered = true))
+      while (!answered) await run(1)
+      rtts.push(Date.now() - at)
+    }
+    expect(rtts.filter((ms) => ms > 2 * LATENCY_MS + 1)).toEqual([])
+  },
+)
+
 test('a fresh wire carrying only small messages stops announcing them once one announcement was acknowledged, either way', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   let got = 0

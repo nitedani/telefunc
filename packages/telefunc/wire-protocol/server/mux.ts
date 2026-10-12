@@ -1070,6 +1070,7 @@ class ChannelMux {
     if (!entry) return
     const { state } = entry
     if (state.pastSendBacklog) return
+    if (frame[0] === TAG.ACK_RES) state.pieces?.receiver.answering()
     if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
     if (frame.byteLength > state.sendHeadroom) {
       state.sendHeadroom = this.sendHeadroom(entry, connection)

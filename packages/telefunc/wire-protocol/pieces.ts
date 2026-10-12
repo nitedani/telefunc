@@ -411,10 +411,10 @@ class PieceSender {
  *  before it. A receiver whose peer holds data back by what it acknowledges (`peerHoldsBack`: the server's, see
  *  `SendBudget`) acknowledges each announced message, as its peer's PINGs wait behind them, once more than
  *  `WIRE_PIECES_ACK_BYTES` of frames of any size are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`,
- *  and data within `WIRE_SEND_ACK_MS`. Any other acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an
- *  announcement closed, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them
- *  allows one (`link`, see `Link.acks`): all a sender needs that cuts its pieces by the rate it measures, and stops
- *  announcing by the rate it carries. */
+ *  data within `WIRE_SEND_ACK_MS`, and what it took before its side answers it (`answering`). Any other acknowledges
+ *  when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one PIECES_ACK per
+ *  `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them allows one (`link`, see `Link.acks`): all a sender
+ *  needs that cuts its pieces by the rate it measures, and stops announcing by the rate it carries. */
 class PieceReceiver {
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
@@ -497,6 +497,12 @@ class PieceReceiver {
     this.lastAnnounced = bytes
     this.announced += bytes
     return true
+  }
+
+  /** Its side answers what arrived: where its peer holds data back, acknowledges the data it took first, so the peer's
+   *  next request doesn't wait for the acknowledgement's timer. */
+  answering(): void {
+    if (this.options.peerHoldsBack && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledge()
   }
 
   /** Bytes it holds of a frame not yet whole. */
