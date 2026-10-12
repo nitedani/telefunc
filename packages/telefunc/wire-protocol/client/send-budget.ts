@@ -18,15 +18,18 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
 /** How much of the excess queue a round of acknowledgements sheds. */
 const SHED_SHARE = 0.5
 
+/** Data handed to the socket at once: where it ends, of all the sender handed, its bytes, what the uplink held ahead of
+ *  it, and when. */
+type SentData = { end: number; bytes: number; ahead: number; at: number }
+
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
 class SendBudget {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   /** The allowance as measured delays moved it, null before the first: till then it is the least. */
   private movedAllowance: number | null = null
-  /** The data handed to the socket and not covered by an acknowledgement: where each part handed at once ends, of all
-   *  the sender handed, its bytes, what the uplink held ahead of it, and when. */
-  private readonly sent = new Fifo<{ end: number; bytes: number; ahead: number; at: number }>()
+  /** The data handed to the socket and not covered by an acknowledgement. */
+  private readonly sent = new Fifo<SentData>()
   /** In ms, the server's clock from the first data an acknowledgement covered. */
   private arrivedAt = DOUBLE_ZERO
   /** The least one-way delay of data on the path, up to the offset between the clocks. */
@@ -102,7 +105,7 @@ class SendBudget {
     this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
     this.lateAt = now
     this.uplink.arrived(newly, spanMs)
-    let newest: { end: number; bytes: number; ahead: number; at: number } | undefined
+    let newest: SentData | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
     if (newest !== undefined) this.measure(newest, newly, spanUs)
@@ -156,11 +159,7 @@ class SendBudget {
 
   /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered, `spanUs`
    *  after the data the one before covered. */
-  private measure(
-    newest: { end: number; bytes: number; ahead: number; at: number },
-    newly: number,
-    spanUs: number,
-  ): void {
+  private measure(newest: SentData, newly: number, spanUs: number): void {
     const delay = this.arrivedAt - newest.at
     const { drainRate } = this.uplink
     const path = drainRate > 0 ? delay - (newest.ahead + newest.bytes) / drainRate : delay
