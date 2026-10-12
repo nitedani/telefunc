@@ -13,6 +13,15 @@ const DRAIN_RATES = 8
 /** How long a wait stays in the history a download's window reads (see `SendWait`). */
 const WAITS_KEPT_MS = 60_000
 
+/** Adds `rate` to `rates`, the newest `DRAIN_RATES`, and returns the fastest of them. */
+function newestFastest(rates: number[], rate: number): number {
+  rates.push(rate)
+  if (rates.length > DRAIN_RATES) rates.shift()
+  let fastest = rate
+  for (const each of rates) if (each > fastest) fastest = each
+  return fastest
+}
+
 /** How long the frames this side sends at once wait behind its own data on its wire, where it can tell. */
 type SendWait = {
   /** What a frame sent now waits. */
@@ -89,9 +98,7 @@ class Link implements SendWait {
     this.deliveredBytes += bytes
     const span = at - this.deliveredFrom
     if (span < DRAIN_SPAN_MS) return
-    this.deliveryRates.push(this.deliveredBytes / span)
-    if (this.deliveryRates.length > DRAIN_RATES) this.deliveryRates.shift()
-    this.deliveryRate = Math.max(...this.deliveryRates)
+    this.deliveryRate = newestFastest(this.deliveryRates, this.deliveredBytes / span)
     this.deliveredBytes = 0
     this.deliveredFrom = at
     this.deliveryGoesOn = true
@@ -155,9 +162,7 @@ class Link implements SendWait {
     this.spanBytes += bytes
     this.spanMs += spanMs
     if (this.spanMs < DRAIN_SPAN_MS) return
-    this.drainRates.push(this.spanBytes / this.spanMs)
-    if (this.drainRates.length > DRAIN_RATES) this.drainRates.shift()
-    this.drainRate = Math.max(...this.drainRates)
+    this.drainRate = newestFastest(this.drainRates, this.spanBytes / this.spanMs)
     this.spanBytes = this.spanMs = 0
   }
 
@@ -237,9 +242,7 @@ class SocketWait implements SendWait {
   private measure(now: number): void {
     const held = this.held() ?? 0
     if (this.spanHeld > 0 && held > 0) {
-      this.drainRates.push((this.spanHeld + this.spanHanded - held) / (now - this.spanFrom))
-      if (this.drainRates.length > DRAIN_RATES) this.drainRates.shift()
-      this.drainRate = Math.max(...this.drainRates)
+      this.drainRate = newestFastest(this.drainRates, (this.spanHeld + this.spanHanded - held) / (now - this.spanFrom))
     }
     this.spanFrom = now
     this.spanHeld = held
