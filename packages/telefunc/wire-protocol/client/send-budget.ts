@@ -42,14 +42,14 @@ class SendBudget {
   private lateAt = DOUBLE_ZERO
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = DOUBLE_ZERO
-  /** Called when the timer finds the uplink drained some of what it held. */
-  onRoom: () => void = () => {}
 
   /** `transmit` and `queued` as `PieceSender`'s. */
   constructor(
     transmit: (message: Uint8Array<ArrayBuffer>) => void,
     queued: () => number,
     private readonly uplink: Uplink,
+    /** Called when the timer finds the uplink drained some of what it held. */
+    private readonly onRoom: () => void,
   ) {
     this.sender = new PieceSender(transmit, queued, uplink.link, {
       dataRoom: () => this.roomPast(this.sender.transmittedBytes),

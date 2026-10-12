@@ -37,6 +37,7 @@ function open() {
     () => {},
     () => 0,
     uplink,
+    () => {},
   )
   let sent = 0
   /** Sends a data frame and has the server acknowledge it `spanMs` after the one before it. The allowance, with nothing

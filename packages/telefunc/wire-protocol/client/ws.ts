@@ -213,6 +213,11 @@ class WsTransport implements UpgradeTarget {
       (message) => ws.send(message),
       () => ws.bufferedAmount,
       uplink,
+      () => {
+        if (this.ws !== ws) return
+        budget.sendHeld()
+        this.onRoom(budget.sender)
+      },
     )
     const { sender } = budget
     return {
@@ -230,11 +235,6 @@ class WsTransport implements UpgradeTarget {
     const { uplink, budget, pieces } = ends
     const { sender } = budget
     this.ends = ends
-    budget.onRoom = () => {
-      if (this.ws !== ws) return
-      budget.sendHeld()
-      this.onRoom(sender)
-    }
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
         if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return false
