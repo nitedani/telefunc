@@ -452,8 +452,7 @@ class SseTransport implements UpgradeSource {
       else this.scheduleFlush()
       return
     }
-    const cbs = this.drainCallbacks.splice(0)
-    for (const cb of cbs) cb()
+    this.settleDrained()
   }
 
   /** A PING still held behind the POST out at its deadline goes on its own: the next POST would bring it past the
@@ -545,8 +544,7 @@ class SseTransport implements UpgradeSource {
     this.closeAbandonedTransport()
     this.abandonedStream = abortController
     this.abandonedControllers.add(abortController)
-    const cbs = this.drainCallbacks.splice(0)
-    for (const cb of cbs) cb()
+    this.settleDrained()
   }
 
   closeAbandonedTransport(): void {
@@ -586,6 +584,10 @@ class SseTransport implements UpgradeSource {
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
+  private settleDrained(): void {
+    for (const cb of this.drainCallbacks.splice(0)) cb()
+  }
+
   dispose(): void {
     this.connecting = false
     if (this.startTimer) {
@@ -600,8 +602,7 @@ class SseTransport implements UpgradeSource {
     this.transportAbort?.abort()
     this.transportAbort = null
     this.closeAbandonedTransport()
-    const cbs = this.drainCallbacks.splice(0)
-    for (const cb of cbs) cb()
+    this.settleDrained()
   }
 
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
