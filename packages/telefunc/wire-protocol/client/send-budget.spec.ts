@@ -6,11 +6,11 @@ import {
   WIRE_PROBE_PAIR_BYTES,
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
-} from './constants.js'
-import { Link } from './link.js'
-import { PieceSender } from './pieces.js'
+} from '../constants.js'
+import { Link } from '../link.js'
+import { PieceSender } from '../pieces.js'
 import { SendBudget } from './send-budget.js'
-import { TAG } from './shared-ws.js'
+import { TAG } from '../shared-ws.js'
 
 afterEach(() => void vi.restoreAllMocks())
 

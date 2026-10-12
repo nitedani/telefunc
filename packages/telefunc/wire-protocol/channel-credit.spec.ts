@@ -19,7 +19,7 @@ import {
 import { ChannelOverflowError } from './channel-errors.js'
 import { Fifo } from '../utils/Fifo.js'
 import { TAG, encode, isOneFrame, messageFrames } from './shared-ws.js'
-import { SendBudget } from './send-budget.js'
+import { SendBudget } from './client/send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 

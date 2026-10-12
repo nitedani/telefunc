@@ -224,7 +224,7 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
-/** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
+/** The same where its peer holds data back by what it acknowledges (see `client/send-budget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acknowledges data at most this long after it arrived, once
  *  `WIRE_SEND_ACK_MIN_BYTES` are unacknowledged: on a slow uplink its peer learns the rate data arrives at from a few
@@ -238,10 +238,10 @@ export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 export const WIRE_ACK_SHARE = 0.0025
 export const WIRE_REFRESH_SHARE = 0.0075
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
- *  least (see `send-budget.ts`). */
+ *  least (see `client/send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 /** How long a data frame of the page's may wait in the queues of its wire, as its server's acknowledgements measure it,
- *  before the page stops handing a WebSocket more (see `send-budget.ts`). */
+ *  before the page stops handing a WebSocket more (see `client/send-budget.ts`). */
 export const WIRE_QUEUE_DELAY_MS = 300
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.

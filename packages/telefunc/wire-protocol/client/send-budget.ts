@@ -7,13 +7,13 @@ import {
   WIRE_SEND_ACK_MIN_BYTES,
   WIRE_SEND_ACK_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
-} from './constants.js'
-import type { Link } from './link.js'
-import { PieceSender } from './pieces.js'
-import { isSequencedTag } from './shared-ws.js'
-import { Fifo } from '../utils/Fifo.js'
-import { DOUBLE_ZERO } from '../utils/DOUBLE_ZERO.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
+} from '../constants.js'
+import type { Link } from '../link.js'
+import { PieceSender } from '../pieces.js'
+import { isSequencedTag } from '../shared-ws.js'
+import { Fifo } from '../../utils/Fifo.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** How much of the excess queue a round of acknowledgements sheds. */
 const SHED_SHARE = 0.5
