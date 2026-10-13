@@ -340,6 +340,7 @@ describe('cloudflare adapter entrypoint', () => {
       fetch(request: Request): Promise<Response>
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
+      webSocketError(ws: WebSocket, error: unknown): void
       telefuncBroadcastPublish(request: unknown): unknown
       telefuncBroadcastDeliver(request: unknown): void
     }
@@ -374,6 +375,15 @@ describe('cloudflare adapter entrypoint', () => {
       1000,
       'done',
       true,
+    )
+
+    instance.webSocketError({} as WebSocket, new Error('WebSocket protocol error'))
+    expect(mocks.crosswsAdapter.handleDurableClose).toHaveBeenLastCalledWith(
+      instance,
+      expect.anything(),
+      1006,
+      'error',
+      false,
     )
 
     instance.telefuncBroadcastPublish({
