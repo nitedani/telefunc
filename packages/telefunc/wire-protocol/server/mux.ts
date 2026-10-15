@@ -304,8 +304,7 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         carry: (frame) => {
-          const pieces = this.connectionEntries.get(connection)?.state.pieces
-          if (pieces) pieces.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
+          if (sender) sender.carry(() => frame as Uint8Array<ArrayBuffer>)
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
