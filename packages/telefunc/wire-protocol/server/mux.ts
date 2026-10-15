@@ -219,9 +219,10 @@ class ChannelMux {
     channel._registerChannel()
     this.channels.set(channel.id, channel)
     // Before a waiter attaches it: its `onOpen` may end it.
-    channel._onShutdown((keep, pageAttached) =>
-      keep ? this.keepEnded(channel, pageAttached) : this.unregisterChannel(channel.id),
-    )
+    channel._onShutdown((keep, pageAttached) => {
+      if (keep) this.keepEnded(channel, pageAttached)
+      else this.unregisterChannel(channel.id)
+    })
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
