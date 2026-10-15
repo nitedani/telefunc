@@ -49,7 +49,8 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceSender, ServerPieceReceiver } from '../pieces.js'
+import { PieceSender } from '../pieces.js'
+import { ServerPieceReceiver } from './server-piece-receiver.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'

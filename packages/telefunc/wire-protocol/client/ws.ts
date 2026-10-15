@@ -2,7 +2,8 @@ export { WsTransport }
 
 import { assert } from '../../utils/assert.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../constants.js'
-import { PagePieceReceiver, PieceSender } from '../pieces.js'
+import { PieceSender } from '../pieces.js'
+import { PagePieceReceiver } from './page-piece-receiver.js'
 import { SendBudget } from './send-budget.js'
 import { Uplink } from './uplink.js'
 import {

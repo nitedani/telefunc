@@ -1,6 +1,8 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { Link } from './link.js'
-import { PagePieceReceiver, PieceSender, ServerPieceReceiver } from './pieces.js'
+import { PieceSender } from './pieces.js'
+import { PagePieceReceiver } from './client/page-piece-receiver.js'
+import { ServerPieceReceiver } from './server/server-piece-receiver.js'
 import { Uplink } from './client/uplink.js'
 import { decode, encode, TAG } from './shared-ws.js'
 
