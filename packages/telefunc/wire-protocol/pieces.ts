@@ -38,11 +38,11 @@ type SendRoom = {
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not. */
   handed(bytes: number, data: boolean): void
-  /** It handed the socket a PIECES_ACK, or a window refresh, of `tag` and `bytes`. */
-  handedControl(tag: number, bytes: number): void
+  /** It handed the socket a frame of `tag` and `bytes`. */
+  handedFrame(tag: number, bytes: number): void
 }
 
-const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, handedControl: () => {} }
+const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, handedFrame: () => {} }
 
 /** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
@@ -136,8 +136,7 @@ class PieceSender {
       this.setWholeUpTo()
     }
     const tag = frame[0]!
-    if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW || tag === TAG.PIECES_ACK)
-      this.room.handedControl(tag, frame.byteLength)
+    this.room.handedFrame(tag, frame.byteLength)
     // It passes what waits: the probe its peer waits on may be its own.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
@@ -489,7 +488,7 @@ class PieceSender {
     for (const take of this.carried.splice(0)) {
       const frame = take()
       if (frame === null) continue
-      this.room.handedControl(frame[0]!, frame.byteLength)
+      this.room.handedFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
       this.add(frame)
     }

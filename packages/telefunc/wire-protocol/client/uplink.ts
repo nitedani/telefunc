@@ -143,10 +143,10 @@ class Uplink implements SendWait {
     return Math.max(this.waits.since(at), this.waitNow())
   }
 
-  /** Notes a PIECES_ACK, or a window refresh, of `tag` and `bytes`, handed to the socket. */
-  handedControl(tag: number, bytes: number): void {
-    const share = tag === TAG.PIECES_ACK ? this.acks : this.refreshes
-    share.handed(bytes)
+  /** Notes a frame of `tag` and `bytes` handed to the socket: a PIECES_ACK or a window refresh takes its share. */
+  handedFrame(tag: number, bytes: number): void {
+    if (tag === TAG.PIECES_ACK) this.acks.handed(bytes)
+    else if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.refreshes.handed(bytes)
   }
 
   /** Notes a wait seen now: what a frame that goes at once waits, or what data waited. */

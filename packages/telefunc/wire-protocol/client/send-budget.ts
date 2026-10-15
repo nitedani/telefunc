@@ -57,7 +57,7 @@ class SendBudget {
     this.sender = new PieceSender(transmit, queued, uplink.link, {
       dataRoom: () => this.roomPast(this.sender.transmittedBytes),
       handed: (bytes, data) => this.handed(bytes, data),
-      handedControl: (tag, bytes) => uplink.handedControl(tag, bytes),
+      handedFrame: (tag, bytes) => uplink.handedFrame(tag, bytes),
     })
   }
 
