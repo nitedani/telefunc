@@ -36,15 +36,11 @@ class Uplink implements SendWait {
   private deliveredAt = Number.NEGATIVE_INFINITY
   /** The span being measured started as the one before it ended, not after a pause. */
   private deliveryGoesOn = false
+  readonly link = new Link()
   /** The acknowledgements and the window refreshes of what this side receives, each kind within its share of the rate
    *  the link carries. */
-  readonly acks: Share
-  readonly refreshes: Share
-
-  constructor(readonly link = new Link()) {
-    this.acks = new Share(link, WIRE_ACK_SHARE)
-    this.refreshes = new Share(link, WIRE_REFRESH_SHARE)
-  }
+  readonly acks = new Share(this.link, WIRE_ACK_SHARE)
+  readonly refreshes = new Share(this.link, WIRE_REFRESH_SHARE)
 
   /** The channels on this wire granted the peer `bytes` more credit: it reaches it once what the uplink holds drained. */
   granted(bytes: number): void {
