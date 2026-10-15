@@ -35,7 +35,7 @@ import {
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
-import { replayWindow } from '../flow-control/flow-control.js'
+import { replayWindow, type ByteWindowKind } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
   ACK_STATUS,
@@ -157,7 +157,7 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean, withNext: boolean): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
@@ -751,11 +751,10 @@ class ClientConnection implements MuxConnection {
     this.sendOrQueue(ix, seq, buildFrame(ix, seq), 'control')
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean, withNext: boolean): void {
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0)
-    this.sendUnsequenced(ix, frame, urgent ? 'urgent-flow-control' : withNext ? 'acknowledgement' : 'flow-control')
+    this.sendUnsequenced(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0), kind)
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {

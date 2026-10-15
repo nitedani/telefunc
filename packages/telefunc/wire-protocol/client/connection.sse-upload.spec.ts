@@ -620,7 +620,7 @@ describe('a slow uplink', () => {
     })
     await vi.advanceTimersByTimeAsync(500)
     const queuedAt = Date.now()
-    connection.sendByteWindowUpdate(channel, 1 << 20, true)
+    connection.sendByteWindowUpdate(channel, 1 << 20, 'urgent-flow-control')
     await advanceUntil(() => arrivals.length === 1, 10_000)
     expect(arrivals).toHaveLength(1)
     expect(arrivals[0]! - queuedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)

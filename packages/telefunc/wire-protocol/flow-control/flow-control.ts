@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { FlowControlEmit }
+export type { ByteWindowKind, FlowControlEmit }
 
 import { BdpEstimator } from './bdp-estimator.js'
 import type { Link, SendWait } from '../link.js'
@@ -16,13 +16,15 @@ import {
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
+/** `urgent-flow-control`: past half its window has been consumed since the last urgent limit, so the peer may be close to
+ *  blocking: a transport that batches should send it at once. `acknowledgement`: it only acknowledges what arrived, so
+ *  it may go in the next message its wire sends. */
+type ByteWindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
+
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
  *  arrived (see `constants.ts`). */
 interface FlowControlEmit {
-  /** `urgent`: past half its window has been consumed since the last urgent limit, so the peer may be close to
-   *  blocking: a transport that batches should send it at once. `withNext`: it only acknowledges what arrived, so it
-   *  may go in the next message its wire sends. */
-  byteWindowUpdate(limit: number, urgent: boolean, withNext: boolean): void
+  byteWindowUpdate(limit: number, kind: ByteWindowKind): void
   msgWindowUpdate(limit: number, urgent: boolean): void
   bdpPing(probe: number): void
 }
@@ -416,9 +418,12 @@ class FlowControl {
     }
     this._uncountedBytes = 0
     this._arrived = false
-    const urgent = (this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow
-    if (urgent) this._urgentBytes = this._consumedBytes
-    this._emit.byteWindowUpdate(limit >>> 0, urgent, acknowledging && !urgent)
+    let kind: ByteWindowKind = acknowledging ? 'acknowledgement' : 'flow-control'
+    if ((this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow) {
+      this._urgentBytes = this._consumedBytes
+      kind = 'urgent-flow-control'
+    }
+    this._emit.byteWindowUpdate(limit >>> 0, kind)
   }
 
   private _advertiseMessages(): void {
