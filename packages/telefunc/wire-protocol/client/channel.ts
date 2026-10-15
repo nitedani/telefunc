@@ -130,7 +130,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       },
       () => this._connection.bufferedAmount(),
       FC_PAGE_YIELD_BYTES,
-      () => this._connection.sendWait(),
     )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {

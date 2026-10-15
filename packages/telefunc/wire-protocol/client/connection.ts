@@ -35,7 +35,6 @@ import {
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
-import type { SendWait } from '../link.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
@@ -166,8 +165,6 @@ interface MuxConnection {
   bufferedAmount(): number
   /** The bytes the wire delivered in the `ms` before it last delivered: before a frame handled as it arrives. */
   deliveredBeforeLast(ms: number): number
-  /** How long the frames that go at once wait behind the wire's own data, `null` where it can't tell. */
-  sendWait(): SendWait | null
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -244,8 +241,6 @@ type ClientChannelTransport = {
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
-  /** How long the frames that go at once wait behind its wire's own data, `null` where it can't tell. */
-  sendWait(): SendWait | null
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>
   dispose(): void
@@ -786,10 +781,6 @@ class ClientConnection implements MuxConnection {
 
   deliveredBeforeLast(ms: number): number {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
-  }
-
-  sendWait(): SendWait | null {
-    return this.transport.sendWait()
   }
 
   /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait: a limit is cumulative, so one

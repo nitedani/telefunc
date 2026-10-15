@@ -4,7 +4,6 @@ import { assert } from '../../utils/assert.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../constants.js'
 import { PagePieceReceiver, PieceSender } from '../pieces.js'
 import { SendBudget } from './send-budget.js'
-import type { SendWait } from '../link.js'
 import { Uplink } from './uplink.js'
 import {
   LENGTH_BYTES,
@@ -291,10 +290,6 @@ class WsTransport implements UpgradeTarget {
   get uplink(): Uplink {
     assert(this.ends)
     return this.ends.uplink
-  }
-
-  sendWait(): SendWait | null {
-    return this.ends?.uplink ?? null
   }
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
