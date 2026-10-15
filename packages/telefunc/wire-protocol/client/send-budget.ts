@@ -82,11 +82,6 @@ class SendBudget {
     return this.roomPast(this.sender.sentBytes)
   }
 
-  /** Sends what the sender holds for room, as far as it goes now. */
-  sendHeld(): void {
-    this.sender.sendHeld()
-  }
-
   /** A message arrived: where the timer is late to look again, looks now. A hidden tab throttles timers, not messages. */
   received(): void {
     if (this.paceTimer === null || performance.now() < this.paceDue) return
@@ -112,7 +107,7 @@ class SendBudget {
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
     if (newest !== undefined) this.measure(newest, newly, spanUs)
-    this.sendHeld()
+    this.sender.sendHeld()
     this.pace()
     return true
   }
