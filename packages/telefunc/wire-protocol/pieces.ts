@@ -555,8 +555,8 @@ abstract class PieceReceiver {
 
   /** A whole frame of `bytes` arrived at `at`, as an announced message if `announced`. */
   protected abstract tookFrame(bytes: number, data: boolean, announced: boolean, at: number): void
-  /** A piece arrived, as an announced message if `announced`, and made its frame `whole`. */
-  protected abstract tookPiece(whole: boolean, announced: boolean): void
+  /** A piece arrived, as an announced message if `announced`, and made its frame `whole`, a data frame if `data`. */
+  protected abstract tookPiece(whole: boolean, announced: boolean, data: boolean): void
   /** An ANNOUNCE that arrived at `at` closed an announcement. */
   protected abstract tookClose(at: number): void
   /** How long an acknowledgement waits from now. */
@@ -645,7 +645,7 @@ abstract class PieceReceiver {
     if (this.probing > 0) {
       this.probing--
       this.acknowledge()
-    } else this.tookPiece(whole, announced)
+    } else this.tookPiece(whole, announced, this.data)
     if (!whole) return null
     const frame = this.frame
     this.frame = new Uint8Array(0)
@@ -725,18 +725,20 @@ class ServerPieceReceiver extends PieceReceiver {
     if (this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeWithNext()
   }
 
-  protected override date(data: boolean, at: number): void {
-    super.date(data, at)
-    if (data && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeIn(WIRE_SEND_ACK_MS)
-  }
-
   protected tookFrame(_bytes: number, data: boolean, announced: boolean, at: number): void {
     this.date(data, at)
+    this.tookData(data)
     if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
   }
 
-  protected tookPiece(_whole: boolean, announced: boolean): void {
+  protected tookPiece(_whole: boolean, announced: boolean, data: boolean): void {
+    this.tookData(data)
     if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+  }
+
+  /** Acknowledges data within `WIRE_SEND_ACK_MS`, once it took enough since the last acknowledgement. */
+  private tookData(data: boolean): void {
+    if (data && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeIn(WIRE_SEND_ACK_MS)
   }
 
   protected tookClose(): void {}
