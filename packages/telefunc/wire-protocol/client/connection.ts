@@ -1144,7 +1144,6 @@ class ClientConnection implements MuxConnection {
       if (ctrl.upgradeId !== committing.upgradeId) return
       committing.committed = true
     }
-    for (const [ix, probe] of this.inFlight.probes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
     this.transport.applyReconciledSettings(ctrl)
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
@@ -1563,8 +1562,9 @@ class ClientConnection implements MuxConnection {
 
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
-    const { ixes, attachResults, carriedFrom } = this.inFlight
+    const { ixes, probes, attachResults, carriedFrom } = this.inFlight
     this.inFlight = reconcileInFlight()
+    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
     for (const [ix, initial] of ixes) {
