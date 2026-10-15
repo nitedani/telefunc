@@ -91,6 +91,7 @@ type ProbeWire = {
 
 type ProbeSession = {
   upgradeId: string
+  sessionId: string
   probeHeartbeat: Heartbeat
   uplink: Uplink
 }
@@ -1207,7 +1208,7 @@ class ClientConnection implements MuxConnection {
       const to = UPGRADE_TARGET_REGISTRY[targetTransport](this.telefuncUrl, this)
       const session = await this.stageProbe(to, sessionId, attempt)
       if (!session) return
-      await this.commitBarrier(from, to, session, sessionId, attempt)
+      await this.commitBarrier(from, to, session, attempt)
     } finally {
       this.exitUpgradeAttempt(attempt)
       this.flushPendingRegisterReconcile()
@@ -1249,7 +1250,7 @@ class ClientConnection implements MuxConnection {
       return null
     }
     this.enterUpgradeReady(attempt)
-    return { upgradeId, probeHeartbeat, uplink: probe.uplink }
+    return { upgradeId, sessionId, probeHeartbeat, uplink: probe.uplink }
   }
 
   /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
@@ -1279,17 +1280,13 @@ class ClientConnection implements MuxConnection {
     from: UpgradeSource,
     to: UpgradeTarget,
     session: ProbeSession,
-    sessionId: string,
     attempt: AbortController,
   ): Promise<void> {
     // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
     await this.reconcileSettled(attempt.signal)
     if (attempt.signal.aborted) return
     this.enterUpgradeCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(
-      () => this.buildBarrierFrame(sessionId, session.upgradeId, session.uplink),
-      attempt.signal,
-    )
+    const emission = await from.emitBarrier(() => this.buildBarrierFrame(session), attempt.signal)
 
     if (emission === 'not-emitted') {
       attempt.abort()
@@ -1448,7 +1445,7 @@ class ClientConnection implements MuxConnection {
 
   /** The old wire's last frame. A channel the server awaits is listed, and its await moves to the new wire. One no
    *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
-  private buildBarrierFrame(sessionId: string, upgradeId: string, uplink: Uplink): OutboundFrame {
+  private buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
     const open = this.declareOpenEntries({ skipUnnamed: true, uplink, batched: false })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
