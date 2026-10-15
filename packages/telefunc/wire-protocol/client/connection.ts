@@ -792,10 +792,8 @@ class ClientConnection implements MuxConnection {
     return this.transport.sendWait()
   }
 
-  /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
-   *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
-   *  to advertise it again. */
-  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait. */
+  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait: a limit is cumulative, so one
+   *  that waited is still right. */
   private sendUnsequenced(ix: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
       this.settleQueue().push({ frame, channelIx: ix, seq: undefined })
