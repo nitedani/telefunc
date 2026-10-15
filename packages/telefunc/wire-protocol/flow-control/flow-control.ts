@@ -418,7 +418,7 @@ class FlowControl {
     this._arrived = false
     const urgent = (this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow
     if (urgent) this._urgentBytes = this._consumedBytes
-    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0, urgent, acknowledging && !urgent)
+    this._emit.byteWindowUpdate(limit >>> 0, urgent, acknowledging && !urgent)
   }
 
   private _advertiseMessages(): void {
