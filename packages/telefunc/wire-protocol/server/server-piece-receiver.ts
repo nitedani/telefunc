@@ -3,10 +3,7 @@ export { ServerPieceReceiver }
 import { WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_GAP_MS, WIRE_SEND_ACK_MIN_BYTES, WIRE_SEND_ACK_MS } from '../constants.js'
 import { PieceReceiver } from '../pieces.js'
 
-/** The server's: its peer, the page, holds data back by what it acknowledges (see `SendBudget`), so it acknowledges each
- *  announced message, as the page's PINGs wait behind them, once more than `WIRE_PIECES_ACK_BYTES` of frames of any size
- *  are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`, data within `WIRE_SEND_ACK_MS`, and what it
- *  took in the message of its answer to it (`answering`). */
+/** The server's: it acknowledges what the page holds back by, soon and in its answers. */
 class ServerPieceReceiver extends PieceReceiver {
   /** Its side answers what arrived: the answer's message acknowledges the data it took, so the page's next request
    *  doesn't wait for the acknowledgement's timer. */

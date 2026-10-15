@@ -5,9 +5,7 @@ import { DRAIN_SPAN_MS, Link, Waits, newestFastest, type SendWait } from '../lin
 import { TAG } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 
-/** A page's uplink: the rate the server takes data at, what the uplink holds at that rate, how long the frames
- *  that go at once waited behind it, how long what the server sends waits behind what the page's credit let it send,
- *  and when the page's next acknowledgement or window refresh may go. */
+/** A page's uplink: the rate the server takes data at, what the uplink holds, and the shares its control frames take. */
 class Uplink implements SendWait {
   /** In bytes per ms: the fastest of the newest rates the peer took data at, 0 before any. */
   drainRate = 0

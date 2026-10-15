@@ -4,10 +4,7 @@ import { WIRE_PIECES_ACK_GAP_MS } from '../constants.js'
 import { PieceReceiver, acknowledges } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 
-/** The page's: it acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one
- *  PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS` and none before its uplink's share for them allows one, a frame in the message
- *  its side sends next: all a sender needs that cuts its pieces by the rate it measures, and stops announcing by the
- *  rate it carries. */
+/** The page's: it acknowledges frames over `WIRE_PIECES_ACK_BYTES` and announcements' close, within its uplink's share. */
 class PagePieceReceiver extends PieceReceiver {
   constructor(
     send: (frame: Uint8Array<ArrayBuffer>) => void,
