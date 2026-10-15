@@ -268,7 +268,7 @@ class FlowControl {
     if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD) return
     if (wantBytes) {
       this._bdp.growBytes()
-      this._advertiseBytes()
+      this._advertiseBytes(false)
     }
     if (wantMsgs) {
       this._bdp.growMsgs()
@@ -330,10 +330,10 @@ class FlowControl {
     this._bdp.reset()
     if (!this._wired) {
       this._wired = true
-      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) this._advertiseBytes()
+      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) this._advertiseBytes(false)
       return
     }
-    this._advertiseBytes()
+    this._advertiseBytes(false)
     this._advertiseMessages()
   }
 
@@ -366,7 +366,7 @@ class FlowControl {
   useBatchTransportInitial(): void {
     const prev = this.byteWindow
     this._bdp.raiseByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
-    if (this.byteWindow > prev) this._advertiseBytes()
+    if (this.byteWindow > prev) this._advertiseBytes(false)
   }
 
   shutdown(): void {
@@ -401,12 +401,12 @@ class FlowControl {
       )
       return
     }
-    if (bytes) this._advertiseBytes()
+    if (bytes) this._advertiseBytes(false)
     if (messages) this._advertiseMessages()
   }
 
   /** `acknowledging`: it goes to acknowledge what arrived, not for a limit that was due. */
-  private _advertiseBytes(acknowledging = false): void {
+  private _advertiseBytes(acknowledging: boolean): void {
     if (!this._fitted) return
     this._advertisedBytes = this._consumedBytes
     const limit = this._consumedBytes + this.byteWindow

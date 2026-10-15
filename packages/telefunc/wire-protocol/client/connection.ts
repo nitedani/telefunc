@@ -615,7 +615,7 @@ class ClientConnection implements MuxConnection {
     if (this.registerReconcileTimer === null) return
     if (this.state.tag !== 'open' || this.state.upgrade.tag === 'committing' || this.upgradeReady) return
     if (this.reconciling) return
-    this.sendReconcileBatch(this.stageReconcileBatch())
+    this.sendReconcileBatch(this.stageReconcileBatch(false))
   }
 
   private cancelRegisterReconcileTimer(): void {
@@ -810,7 +810,7 @@ class ClientConnection implements MuxConnection {
     if (transport !== this.transport) return
     this.enterOpen()
     if (this.transport.sendReconcileOnOpen) {
-      this.sendReconcileBatch(this.stageReconcileBatch())
+      this.sendReconcileBatch(this.stageReconcileBatch(false))
       this.beatFromReconcile(transport)
       return
     }
@@ -941,13 +941,13 @@ class ClientConnection implements MuxConnection {
    *  the first, provisionally at the least one a server accepts, pinging only once that passed: a RECONCILED that comes
    *  sooner replaces it before it adds a frame. */
   private beatFromReconcile(transport: ClientChannelTransport): void {
-    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs)
+    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs, false)
     else this.installHeartbeat(transport, CHANNEL_PING_INTERVAL_MIN_MS, true)
   }
 
   /** Idempotent once a RECONCILED set the interval. Detaches first either way so a fresh install can never leak the
    *  prior. A provisional one leaves the server's interval unknown, and the next install replaces it. */
-  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional = false): void {
+  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional: boolean): void {
     if (transport.heartbeat !== null && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
     transport.detachHeartbeat()
     if (!provisional) this.pingIntervalMs = intervalMs
@@ -1148,7 +1148,7 @@ class ClientConnection implements MuxConnection {
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
-    this.installHeartbeat(this.transport, ctrl.pingInterval)
+    this.installHeartbeat(this.transport, ctrl.pingInterval, false)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen)
@@ -1190,7 +1190,7 @@ class ClientConnection implements MuxConnection {
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
-    this.handleTransportLoss(err)
+    this.handleTransportLoss(err, false)
   }
 
   private isTransportUpgradeAllowed(nextTransport: ChannelTransport): boolean {
@@ -1263,7 +1263,7 @@ class ClientConnection implements MuxConnection {
     )
     probe.onPong(() => heartbeat.resetPong())
     probe.onClose(() => attempt.abort())
-    heartbeat.start()
+    heartbeat.start(true)
     attempt.signal.addEventListener(
       'abort',
       () => {
@@ -1330,7 +1330,7 @@ class ClientConnection implements MuxConnection {
     this.startTtlIfIdle()
   }
 
-  private handleTransportLoss(err: Error, rejected = false): void {
+  private handleTransportLoss(err: Error, rejected: boolean): void {
     if (this.closed) return
     if (this.flipped) {
       this.fallbackToSse(err)
@@ -1525,7 +1525,7 @@ class ClientConnection implements MuxConnection {
 
   private readonly isSendable = (ix: number): boolean => !this.awaitedIxes.has(ix)
 
-  stageReconcileBatch(isInitialBatch = false): ReconcileBatch {
+  stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
     // This batch includes every channel, so it already covers any pending registration.
     this.cancelRegisterReconcileTimer()
     const reconcileFrame = this.buildReconcileFrame()
@@ -1611,7 +1611,7 @@ class ClientConnection implements MuxConnection {
     for (const frame of this.drainBufferedFrames((ix) => serverMap.has(ix))) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
-      const reconcileBatch = this.stageReconcileBatch()
+      const reconcileBatch = this.stageReconcileBatch(false)
       this.appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
       this.exitReconciling()

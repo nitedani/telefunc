@@ -559,7 +559,7 @@ abstract class PieceReceiver {
   /** After a whole frame of `bytes` arrived at `at`: alone in its message, or `riding` ahead of the frame its message ends
    *  with, which dates the message. A data frame dates the ack's span: it takes the queues an upload fills, where the
    *  frames that go at once pass them. */
-  arrived(bytes: number, data: boolean, at: number, riding = false): void {
+  arrived(bytes: number, data: boolean, at: number, riding: boolean): void {
     this.took += bytes
     this.tookFrame(bytes, data, !riding && this.paced(bytes, at), at)
   }
@@ -653,19 +653,30 @@ abstract class PieceReceiver {
     if (data) this.newestDataAt = at
   }
 
-  /** Acknowledges once `ackWait` allows; `withNext`, in the message its side sends next then: an acknowledgement that
-   *  only measures the rate, which its own delay dates, as a peer that holds nothing back takes one of a frame. */
-  protected acknowledgeSoon(withNext = false): void {
+  /** Acknowledges once `ackWait` allows. */
+  protected acknowledgeSoon(): void {
     const wait = this.ackWait()
-    if (wait > 0) this.acknowledgeIn(wait, withNext)
-    else if (withNext) this.acknowledgeWithNext()
+    if (wait > 0) this.acknowledgeIn(wait)
     else this.acknowledge()
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would; `withNext`, as `acknowledgeSoon` says, unless an
-   *  acknowledgement that doesn't wait is due by then too. */
-  protected acknowledgeIn(ms: number, withNext = false): void {
-    if (!withNext) this.ackAlone = true
+  /** Acknowledges once `ackWait` allows, in the message its side sends next then: an acknowledgement that only measures
+   *  the rate, which its own delay dates, as a peer that holds nothing back takes one of a frame. */
+  protected acknowledgeWithNextSoon(): void {
+    const wait = this.ackWait()
+    if (wait > 0) this.armAck(wait)
+    else this.acknowledgeWithNext()
+  }
+
+  /** Acknowledges `ms` from now, or sooner where it already would. */
+  protected acknowledgeIn(ms: number): void {
+    this.ackAlone = true
+    this.armAck(ms)
+  }
+
+  /** Acknowledges `ms` from now, or sooner where it already would: alone if an acknowledgement due by then doesn't wait
+   *  (`ackAlone`), else in the message its side sends next then. */
+  private armAck(ms: number): void {
     const due = performance.now() + ms
     if (this.ackTimer !== null) {
       if (this.ackDue <= due) return

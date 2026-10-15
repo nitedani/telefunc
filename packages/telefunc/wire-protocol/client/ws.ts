@@ -392,7 +392,7 @@ function receiveMessage(
         raw = whole
         frame = decode(raw)
       }
-    } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
+    } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at, false)
   } catch {
     return false
   }

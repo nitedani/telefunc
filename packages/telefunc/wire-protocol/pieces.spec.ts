@@ -207,19 +207,19 @@ test('a receiver whose peer holds data back acknowledges data within 25 ms once 
     (frame) => void sent.push(frame),
     () => {},
   )
-  receiver.arrived(1_000, true, Date.now())
+  receiver.arrived(1_000, true, Date.now(), false)
   vi.advanceTimersByTime(100)
   expect(sent).toHaveLength(0)
-  receiver.arrived(1_500, true, Date.now())
+  receiver.arrived(1_500, true, Date.now(), false)
   vi.advanceTimersByTime(24)
   expect(sent).toHaveLength(0)
   vi.advanceTimersByTime(1)
   expect(acks()).toEqual([{ tag: TAG.PIECES_ACK, bytes: 2_500, heldMs: 25, spanUs: 0 }])
   // 100 ms on, 8 KB twice and 1 KB: past 16 KiB, at once, 125 ms after the data the first ack covered.
   vi.advanceTimersByTime(100)
-  receiver.arrived(8_000, true, Date.now())
-  receiver.arrived(8_000, true, Date.now())
-  receiver.arrived(1_000, true, Date.now())
+  receiver.arrived(8_000, true, Date.now(), false)
+  receiver.arrived(8_000, true, Date.now(), false)
+  receiver.arrived(1_000, true, Date.now(), false)
   expect(acks()[1]).toEqual({ tag: TAG.PIECES_ACK, bytes: 19_500, heldMs: 0, spanUs: 125_000 })
   vi.useRealTimers()
 })
@@ -239,15 +239,15 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB 
     carried = null
     return ack && decode(ack)
   }
-  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now())
+  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now(), false)
   vi.advanceTimersByTime(1_000)
   expect(carried).toBeNull()
-  receiver.arrived(20_000, true, Date.now())
+  receiver.arrived(20_000, true, Date.now(), false)
   vi.advanceTimersByTime(5)
   expect(next()).toEqual({ tag: TAG.PIECES_ACK, bytes: 84_000, heldMs: 5, spanUs: 0 })
   // 50 ms after that one went, which was 5 ms after the first arrived.
   vi.advanceTimersByTime(5)
-  receiver.arrived(20_000, true, Date.now())
+  receiver.arrived(20_000, true, Date.now(), false)
   vi.advanceTimersByTime(44)
   expect(carried).toBeNull()
   vi.advanceTimersByTime(1)

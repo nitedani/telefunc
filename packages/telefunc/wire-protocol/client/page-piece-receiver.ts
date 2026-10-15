@@ -17,11 +17,11 @@ class PagePieceReceiver extends PieceReceiver {
   protected tookFrame(bytes: number, data: boolean, _announced: boolean, at: number): void {
     if (!acknowledges(bytes)) return
     this.date(data, at)
-    this.acknowledgeSoon(true)
+    this.acknowledgeWithNextSoon()
   }
 
   protected tookPiece(whole: boolean): void {
-    if (whole && acknowledges(this.total)) this.acknowledgeSoon(true)
+    if (whole && acknowledges(this.total)) this.acknowledgeWithNextSoon()
   }
 
   protected tookClose(at: number): void {

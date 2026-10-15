@@ -109,7 +109,7 @@ test("a reconnect declares a broadcast's subscriptions, not the toggles queued b
   // Offline, the listener is swapped: an unsubscribe, then a subscribe. The reconcile entry already says subscribed.
   connection.sendBroadcastUnsubscribe(channel, false)
   connection.sendBroadcastSubscribe(channel, false)
-  const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
+  const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch(false)
   expect(decode(reconcileFrame.frame)).toMatchObject({
     payload: { open: [{ broadcast: { text: true, binary: false } }] },
   })
@@ -523,9 +523,9 @@ test('a channel whose abort went out with a reconcile on a wire that then died s
   connection.buildReconcileFrame() // its registration: sends wait for the RECONCILED
   connection.sendAbort(closing, 'null')
   connection.unregister(closing)
-  connection.stageReconcileBatch() // the abort leaves with the registration's reconcile
+  connection.stageReconcileBatch(false) // the abort leaves with the registration's reconcile
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true }) after that
-  connection.handleTransportLoss(new Error('the wire died'))
+  connection.handleTransportLoss(new Error('the wire died'), false)
   connection.buildReconcileFrame()
   const open = [
     { ix: 0, lastSeq: 0 },
@@ -548,7 +548,7 @@ test("a closing channel's listener answer, held while another channel registers 
   ClientConnection.getOrCreate('http://answer-held.test', muxChannelStub(), options) // the listener opens a channel
   connection.sendAckRes(closing, 1, '"answer"') // then answers; the registration holds it
   connection.unregister(closing) // its close round trip is done
-  const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
+  const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch(false)
   const reconcile = decode(reconcileFrame.frame) as { payload: { open: { ix: number }[] } }
   const listed = reconcile.payload.open.map((entry) => entry.ix)
   const queued = [...movedBufferedFrames, ...connection.sendBuffer].map(({ frame }: { frame: Uint8Array }) => frame[0])
@@ -575,7 +575,7 @@ function closeLostWithWire(url: string) {
   )
   const replay = connection.replayBuffers.get(0)
   replay.push(replay.nextSeq(), encode.close(0, 5_000, 1)) // the close request, written to it
-  connection.handleTransportLoss(new Error('the wire died'))
+  connection.handleTransportLoss(new Error('the wire died'), false)
   return { connection, closing }
 }
 
@@ -631,7 +631,7 @@ test('a channel whose close timed out while the reconnect listing it is in fligh
   const replay = connection.replayBuffers.get(0)
   replay.push(replay.nextSeq(), encode.text(0, '"m4"', 1)) // sent into a wire that is dead, not yet noticed
   replay.push(replay.nextSeq(), encode.close(0, 5_000, 2)) // its close request went down with it too
-  connection.handleTransportLoss(new Error('the wire died'))
+  connection.handleTransportLoss(new Error('the wire died'), false)
   connection.buildReconcileFrame() // the SSE attempt's, built when it starts, listing both
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
   connection.unregister(closing) // its close times out while the attempt is held
