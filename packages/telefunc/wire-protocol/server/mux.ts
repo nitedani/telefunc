@@ -161,9 +161,9 @@ type ConnectionState = {
   attaching: Set<ServerChannel>
   /** How long the frames that go at once wait behind what the socket holds. */
   wait: SocketWait
-  /** The probed entries of the RECONCILE it reads, until its RECONCILED answers them: a frame that goes ahead of that
-   *  goes behind a BDP_PING_ACK for each. */
-  probed: ReconcileOpenEntry[]
+  /** Each probed entry's index and probe, of the RECONCILE it reads, until its RECONCILED answers them: a frame that
+   *  goes ahead of that goes behind a BDP_PING_ACK for each. */
+  probed: { ix: number; probe: number }[]
 }
 
 type ConnectionEntry = {
@@ -871,7 +871,7 @@ class ChannelMux {
   ): ChannelHandle | null {
     // Answered ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip
     // is the path's.
-    if (entry.probe !== undefined) conn.state.probed.push(entry)
+    if (entry.probe !== undefined) conn.state.probed.push({ ix: entry.ix, probe: entry.probe })
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
@@ -1082,7 +1082,7 @@ class ChannelMux {
   private answerProbes(connection: Wire, state: ConnectionState): void {
     const probed = state.probed
     state.probed = []
-    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe!, Infinity, Infinity))
+    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe, Infinity, Infinity))
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
