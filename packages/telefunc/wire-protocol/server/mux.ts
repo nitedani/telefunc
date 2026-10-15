@@ -589,17 +589,16 @@ class ChannelMux {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.state.pieces
-      assertProtocol(!pieces || pieces.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+      const fits = pieces ? pieces.sender.heartbeat(frame.took, performance.now()) : true
+      assertProtocol(fits, 'PING took more than sent')
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
       this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(
-        entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs, frame.spanUs),
-        'PIECES_ACK for nothing sent',
-      )
+      const known = entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)
+      assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
