@@ -3,7 +3,7 @@ export { ServerPieceReceiver }
 import { WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_GAP_MS, WIRE_SEND_ACK_MIN_BYTES, WIRE_SEND_ACK_MS } from '../constants.js'
 import { PieceReceiver } from '../pieces.js'
 
-/** The server's: it acknowledges what the page holds back by, soon and in its answers. */
+/** The server's: it acknowledges data soon, as the page's send budget waits on it, and in its answers. */
 class ServerPieceReceiver extends PieceReceiver {
   /** Its side answers what arrived: the answer's message acknowledges the data it took, so the page's next request
    *  doesn't wait for the acknowledgement's timer. */
