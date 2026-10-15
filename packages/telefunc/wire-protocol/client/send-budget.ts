@@ -10,7 +10,7 @@ import {
 } from '../constants.js'
 import { PieceSender } from '../pieces.js'
 import type { Uplink } from './uplink.js'
-import { isSequencedTag } from '../shared-ws.js'
+import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
@@ -90,15 +90,15 @@ class SendBudget {
   }
 
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
-  acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
+  acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
-    if (!this.sender.acknowledged(bytes, heldMs, spanUs)) return false
+    if (!this.sender.acknowledged(ack)) return false
     const acknowledged = this.sender.acknowledgedBytes
     const newly = acknowledged - before
-    const spanMs = spanUs / 1000
+    const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
     const now = performance.now()
-    const back = now - this.arrivedAt - heldMs
+    const back = now - this.arrivedAt - ack.heldMs
     if (back < this.leastBack) this.leastBack = back
     this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
     this.lateAt = now
@@ -106,7 +106,7 @@ class SendBudget {
     let newest: SentData | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
-    if (newest !== undefined) this.measure(newest, newly, spanUs)
+    if (newest !== undefined) this.measure(newest, newly, ack.spanUs)
     this.sender.sendHeld()
     this.pace()
     return true

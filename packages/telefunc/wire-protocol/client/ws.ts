@@ -72,7 +72,7 @@ class WsTransport implements UpgradeTarget {
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
-      if (frame.tag === TAG.PIECES_ACK) return budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)
+      if (frame.tag === TAG.PIECES_ACK) return budget.acknowledged(frame)
       if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
         onPong?.()
@@ -237,7 +237,7 @@ class WsTransport implements UpgradeTarget {
     this.ends = ends
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
-        if (!budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) return false
+        if (!budget.acknowledged(frame)) return false
         this.onRoom(sender)
       } else if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)

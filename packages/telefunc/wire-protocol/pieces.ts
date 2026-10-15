@@ -12,7 +12,7 @@ import {
   WIRE_PROBE_PAIR_BYTES,
 } from './constants.js'
 import { Link } from './link.js'
-import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag } from './shared-ws.js'
+import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag, type PiecesAck } from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
@@ -416,7 +416,7 @@ class PieceSender {
   /** Takes a PIECES_ACK: its receiver took `bytes` of the messages in all (mod 2^32), the newest `heldMs` before it sent
    *  the ack, `spanUs` after the newest data the ack before covered. Returns false if that acknowledges nothing sent, or
    *  more than was sent. */
-  acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
+  acknowledged({ bytes, heldMs, spanUs }: PiecesAck): boolean {
     const newly = (bytes - this.acknowledgedBytes) >>> 0
     if (newly < 1 || newly > this.transmittedBytes - this.acknowledgedBytes) return false
     const probe = this.probe
